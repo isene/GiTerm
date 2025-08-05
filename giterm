@@ -20,12 +20,28 @@ def log_debug(msg)
   end
 end
 
+# Mode-specific index management
+def save_current_index
+  @mode_indices[@mode] = @index if @mode_indices.key?(@mode)
+  log_debug("Saved index #{@index} for mode #{@mode}")
+end
+
+def restore_mode_index(new_mode)
+  if @mode_indices.key?(new_mode)
+    @index = @mode_indices[new_mode]
+    log_debug("Restored index #{@index} for mode #{new_mode}")
+  else
+    @index = 0
+    log_debug("No saved index for mode #{new_mode}, using 0")
+  end
+end
+
 # Clear log at start
 File.write(LOG_FILE, "=== GiTerm Debug Log ===\n")
-log_debug("Starting GiTerm...")
+log_debug('Starting GiTerm...')
 
 at_exit do
-  log_debug("Exiting GiTerm...")
+  log_debug('Exiting GiTerm...')
   system("stty #{ORIG_STTY} 2>/dev/null") rescue nil unless ORIG_STTY.empty?
 end
 
@@ -50,12 +66,198 @@ require 'json'
 require 'net/http'
 require 'uri'
 require 'base64'
+require 'cgi'
 
 # CREATE DIRS & SET FILE CONSTS {{{1
 GITERM_HOME  = File.join(Dir.home, '.giterm')
 CONFIG_FILE  = File.join(GITERM_HOME, 'conf')
 KEYS_FILE    = File.join(GITERM_HOME, 'keys.rb')
 FileUtils.mkdir_p(GITERM_HOME)
+
+# CONFIG FUNCTIONS {{{1
+def load_config
+  # Ensure config directory exists
+  Dir.mkdir(GITERM_HOME) unless Dir.exist?(GITERM_HOME)
+  
+  # Initialize defaults
+  @github_token = ENV['GITHUB_TOKEN'] || ''
+  @width_setting = 3
+  
+  return unless File.exist?(CONFIG_FILE)
+  
+  config = {}
+  File.readlines(CONFIG_FILE).each do |line|
+    next if line.strip.empty? || line.start_with?('#')
+
+    key, value = line.strip.split('=', 2)
+    config[key] = value if key && value
+  end
+  
+  @github_token = config['github_token'] || @github_token
+  @width_setting = (config['width_setting'] || '3').to_i
+  @width_setting = 3 if @width_setting < 2 || @width_setting > 7
+  
+  # Debug: log what we loaded
+  log_debug("Config loaded: token=#{@github_token.empty? ? 'empty' : @github_token[0..7]+'...'}, width=#{@width_setting}")
+end
+
+def save_config
+  config_content = <<~CONFIG
+    # GiTerm Configuration File
+    # Generated automatically - edit carefully
+    
+    github_token=#{@github_token}
+    width_setting=#{@width_setting}
+  CONFIG
+  
+  File.write(CONFIG_FILE, config_content)
+end
+
+def github_token_popup
+  # Show step-by-step guide first
+  show_token_guide
+  
+  # Create temporary overlay pane for token input (nice blue color)
+  rows, cols = IO.console ? IO.console.winsize : [24, 80]
+  overlay_width = [cols - 4, 60].min
+  overlay_x = (cols - overlay_width) / 2
+  overlay_y = rows - 3  # Position above bottom pane
+  
+  @token_overlay = Pane.new(overlay_x, overlay_y, overlay_width, 1, 255, 24)  # White on blue
+  @token_overlay.border = false
+  @token_overlay.define_singleton_method(:update) { @update }
+  @token_overlay.define_singleton_method(:update=) { |val| @update = val }
+  @token_overlay.update = true
+  
+  @token_overlay.say('Token input: visible and pastable (Ctrl+V, Shift+Insert). ESC to cancel.')
+  sleep 1
+  
+  # Get token input using overlay pane
+  token = get_input_line_overlay
+  
+  if token && !token.strip.empty?
+    @github_token = token.strip
+    save_config
+    @token_overlay.say('✓ GitHub token saved! Press any key to continue...')
+  else
+    @token_overlay.say('GitHub token setup cancelled. Press any key to continue...')
+  end
+  
+  getchr  # Wait for keypress
+  
+  # Clear overlay by refreshing all panes
+  update_bottom_legends  # Restore bottom pane
+  @p_left.update = true
+  @p_right.update = true
+  refresh_view
+end
+
+def open_github_token_page
+  @p_bottom.say('Opening GitHub token page in browser...')
+  if system('command -v xdg-open >/dev/null 2>&1')
+    system('xdg-open https://github.com/settings/tokens/new >/dev/null 2>&1 &')
+  elsif system('command -v open >/dev/null 2>&1')  # macOS
+    system('open https://github.com/settings/tokens/new >/dev/null 2>&1 &')
+  else
+    @p_bottom.say('Cannot open browser. Go to: https://github.com/settings/tokens/new')
+    sleep 2
+    return
+  end
+  sleep 1
+  @p_bottom.say('Browser opened. Press T when ready to enter token.')
+end
+
+def show_token_guide
+  # Get terminal dimensions for centering
+  rows, cols = IO.console ? IO.console.winsize : [24, 80]
+  
+  # Create large centered popup for detailed instructions
+  popup_width = [cols - 4, 80].min
+  popup_height = [rows - 4, 20].min
+  popup_x = (cols - popup_width) / 2
+  popup_y = (rows - popup_height) / 2
+  
+  # Create popup pane with dark blue/gray background
+  popup = Pane.new(popup_x, popup_y, popup_width, popup_height, 255, 237)  # Light gray text on dark gray
+  popup.border = true
+  
+  # Add update method
+  popup.define_singleton_method(:update) { @update }
+  popup.define_singleton_method(:update=) { |val| @update = val }
+  popup.update = true
+  
+  guide_content = <<~GUIDE
+    GitHub Personal Access Token Setup
+    ==================================
+    
+    STEP 1: Create a new token
+    • Go to: https://github.com/settings/tokens
+    * Click "Generate new token" → "Generate new token (classic)"
+    • Give it a name like "GiTerm"
+    
+    STEP 2: Set permissions (scopes)
+    Required scopes for GiTerm:
+    ✓ repo (to access private repositories)
+    ✓ user:read (to get user info)  
+    ✓ user:email (to get email)
+    
+    Optional scopes for full functionality:
+    ✓ notifications (to view notifications)
+    ✓ gist (to view gists)
+    
+    STEP 3: Set expiration
+    • Choose "No expiration" or set a long period
+    • Click "Generate token"
+    
+    STEP 4: Copy the token
+    • GitHub will show the token ONCE
+    • Copy it immediately (starts with ghp_)
+    • Paste it in the input field below
+    
+    Navigation: ↑/↓ or j/k to scroll, ENTER to continue
+  GUIDE
+  
+  popup.say(guide_content)
+  popup.refresh
+  
+  # Handle scrolling in popup
+  handle_popup_scrolling(popup)
+  
+  # Simply refresh underlying panes - popup will be drawn over and disappear
+  @p_left.update = true
+  @p_right.update = true
+end
+
+def handle_popup_scrolling(popup)
+  loop do
+    chr = getchr
+    case chr
+    when 'j', 'DOWN'
+      popup.linedown
+    when 'k', 'UP'
+      popup.lineup
+    when 'PgDOWN'
+      popup.pagedown
+    when 'PgUP'
+      popup.pageup
+    when 'ENTER', ' ', 'q', 'ESCAPE'
+      break
+    end
+  end
+end
+
+def get_input_line_overlay
+  # Use rcurses' built-in editline which supports Shift+Insert and other paste methods
+  original_text = ''
+  result = @token_overlay.ask('Enter GitHub token: ', original_text)
+  
+  # If result equals original text, user pressed ESC; otherwise they pressed ENTER
+  if result == original_text
+    nil  # ESC was pressed
+  else
+    result.empty? ? nil : result  # ENTER was pressed
+  end
+end
 
 # GLOBAL VARIABLES {{{1
 @status_items = []
@@ -68,12 +270,25 @@ FileUtils.mkdir_p(GITERM_HOME)
 @max_index = 0
 @min_index = 0
 @mode = :status  # :status, :diff, :log, :branches, :github_repos, :github_issues, :github_prs
+
+# Mode-specific index memory for TAB switching
+@mode_indices = {
+  status: 0,
+  log: 0,
+  branches: 0,
+  github_repos: 0,
+  github_issues: 0,
+  github_prs: 0,
+  github_search: 0
+}
+
 @github_token = ENV['GITHUB_TOKEN'] || ''
 @github_user = ''
 @github_repos = []
 @github_issues = []
 @github_prs = []
 @selected_repo = ''
+@width_setting = 3  # Width setting (2-7, like RTFM)
 
 # HELP {{{1
 @help = <<~HELPTEXT
@@ -84,16 +299,21 @@ FileUtils.mkdir_p(GITERM_HOME)
     q       = Quit GiTerm
     r       = Refresh current view
     TAB     = Switch between Git and GitHub mode
+    w       = Change pane width ratio
 
   NAVIGATION
-    j/DOWN  = Move down
-    k/UP    = Move up
+    j/DOWN  = Move down in left pane
+    k/UP    = Move up in left pane
+    J/S-DOWN = Scroll down one line in right pane
+    K/S-UP  = Scroll up one line in right pane
     h/LEFT  = Go back/up one level
     l/RIGHT = Enter/view details
     g/HOME  = Go to top
     G/END   = Go to bottom
-    PgDown  = Page down
-    PgUp    = Page up
+    PgDown  = Page down in right pane
+    PgUp    = Page up in right pane
+    S-RIGHT = Page down in right pane
+    S-LEFT  = Page up in right pane
 
   GIT MODE
     s       = Show git status
@@ -110,6 +330,8 @@ FileUtils.mkdir_p(GITERM_HOME)
     P       = Push to remote
 
   GITHUB MODE
+    T       = Setup GitHub token (guided)
+    O       = Open GitHub token page in browser
     /       = Search repositories
     i       = Show issues
     I       = Create new issue
@@ -118,53 +340,67 @@ FileUtils.mkdir_p(GITERM_HOME)
     w       = Open in web browser
 
   INTERACTIVE COMMANDS
-    :       = Enter command mode
+    :       = Enter command mode (try :cd <path> to change git repos)
     !       = Run shell command
 HELPTEXT
 
 # INITIALIZATION {{{1
 def init_windows
-  log_debug("Starting init_windows")
+  log_debug('Starting init_windows')
   
   # Get terminal size directly (like astropanel)
-  log_debug("Getting terminal dimensions...")
+  log_debug('Getting terminal dimensions...')
   if IO.console
     rows, cols = IO.console.winsize
     log_debug("Terminal size: #{rows}x#{cols}")
   else
-    log_debug("No IO.console, using fallback")
-    rows, cols = 24, 80
+    log_debug('No IO.console, using fallback')
+    rows = 24
+    cols = 80
   end
   
   # Clear screen and hide cursor (like astropanel)
-  log_debug("Clearing screen...")
+  log_debug('Clearing screen...')
   Rcurses.clear_screen
   Cursor.hide
   
-  # Calculate pane dimensions
-  top_height = 3
+  # Calculate pane dimensions (following RTFM pattern)
+  top_height = 1           # Single row for top info bar
   bottom_height = 1
-  main_height = rows - top_height - bottom_height
-  left_width = cols / 2
-  right_width = cols - left_width
+  main_height = rows - 4   # Account for top (1) + gap (1) + bottom (1) + gap (1)
+  # Calculate left width based on width setting (like RTFM)
+  left_ratio = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7][@width_setting - 2] || 0.4
+  left_width = ((cols - 4) * left_ratio).to_i
   
-  # Create panes (x, y, width, height, fg, bg)
-  log_debug("Creating panes with dimensions: #{rows}x#{cols}")
-  @p_top = Pane.new(1, 1, cols, top_height, 255, 0)
-  log_debug("Top pane created")
-  @p_left = Pane.new(1, top_height + 1, left_width, main_height, 255, 0)
-  log_debug("Left pane created")
-  @p_right = Pane.new(left_width + 1, top_height + 1, right_width, main_height, 255, 0)
-  log_debug("Right pane created")
-  @p_bottom = Pane.new(1, rows, cols, bottom_height, 252, 0)
-  log_debug("Bottom pane created")
+  # Create panes (x, y, width, height, fg, bg) with astropanel-inspired colors
+  bottom_y = rows - bottom_height + 1  # Position bottom pane at actual bottom
+  log_debug("Pane layout: top(1,1,#{cols},#{top_height}) left(2,3,#{left_width},#{main_height}) right(#{left_width + 4},3,#{cols - left_width - 4},#{main_height}) bottom(1,#{bottom_y},#{cols},#{bottom_height})")
+  @p_top = Pane.new(1, 1, cols, top_height, 255, 236)        # White on dark gray
+  log_debug('Top pane created')
+  @p_left = Pane.new(2, 3, left_width, main_height, 255, 232)    # White on light gray
+  log_debug('Left pane created')
+  @p_right = Pane.new(left_width + 4, 3, cols - left_width - 4, main_height, 255, 232)  # White on light gray
+  log_debug('Right pane created')
+  @p_bottom = Pane.new(1, bottom_y, cols, bottom_height, 255, 24)    # White on dark blue
+  log_debug('Bottom pane created')
   
-  # Set borders
-  log_debug("Setting borders...")
-  @p_top.border = @p_left.border = @p_right.border = @p_bottom.border = 1
+  # Set borders (only on main content panes, not top/bottom)
+  log_debug('Setting borders...')
+  @p_top.border = false      # No border, just background color
+  @p_left.border = true      # Main content pane with border
+  @p_right.border = true     # Main content pane with border  
+  @p_bottom.border = false   # No border, just background color
+  
+  # Enable scrolling indicators
+  @p_left.scroll = true      # Show scroll indicators (triangles)
+  @p_right.scroll = true
+  
+  # Initialize scroll positions
+  @p_left.ix = 0
+  @p_right.ix = 0
   
   # Add update attributes (like astropanel)
-  log_debug("Adding update attributes...")
+  log_debug('Adding update attributes...')
   [@p_top, @p_left, @p_right, @p_bottom].each do |pane|
     pane.define_singleton_method(:update) { @update }  
     pane.define_singleton_method(:update=) { |val| @update = val }
@@ -172,10 +408,16 @@ def init_windows
   end
   
   # Initial content
-  log_debug("Updating repo info...")
+  log_debug('Updating repo info...')
   update_repo_info
-  @p_bottom.say('GiTerm initialized - Press ? for help')
-  log_debug("init_windows completed")
+  update_bottom_legends
+  log_debug('init_windows completed')
+end
+
+def update_bottom_legends
+  # Show key legends in bottom pane
+  legends = 'j/k:Nav  PgUp/PgDn:Page  g/G:Top/End  J/K:Scroll  d:Diff  l:Log  b:Branches  TAB:GitHub  q:Quit'
+  @p_bottom.say(legends)
 end
 
 def update_repo_info
@@ -185,17 +427,31 @@ def update_repo_info
   if branch.empty?
     @p_top.say('Not a git repository'.fg(196))
   else
+    repo_name = remote.empty? ? 'Local repository' : File.basename(remote, '.git')
     @current_branch = branch
-    info = "Branch: #{branch}".fg(154)
-    info += " | Remote: #{remote}".fg(249) unless remote.empty?
-    @p_top.say(info)
+    @current_repo = repo_name
+    update_mode_info(@current_mode_title || 'Git Status')
   end
+end
+
+def update_mode_info(mode_title)
+  @current_mode_title = mode_title
+  if @current_branch
+    info = "[#{mode_title}]".fg(156) + " | " + @current_repo.fg(249) + " | " + @current_branch.fg(154)
+  else
+    info = "[#{mode_title}]".fg(156)
+  end
+  @p_top.say(info)
 end
 
 # GIT FUNCTIONS {{{1
 def git_status
   @mode = :status
   @status_items = []
+  @p_left.ix = 0  # Reset scroll position
+  
+  # Restore saved index for this mode
+  restore_mode_index(:status)
   
   output = `git status --porcelain 2>/dev/null`.lines
   output.each do |line|
@@ -206,34 +462,62 @@ def git_status
   
   @max_index = @status_items.length - 1
   @min_index = 0
-  @index = 0 if @index > @max_index
+  
+  # Ensure restored index is within bounds
+  @index = [@index, @max_index].min if @max_index >= 0
+  @index = [@index, @min_index].max
   
   display_status
 end
 
 def display_status
-  content = "Git Status\n".b.fg(156)
-  content += ('=' * 30) + "\n\n"
+  # Update top pane with mode
+  update_mode_info('Git Status')
+  
+  # Always rebuild content to show current selection
+  content = ""
   
   if @status_items.empty?
     content += 'Working tree clean'.fg(154)
   else
     @status_items.each_with_index do |item, i|
-      marker = i == @index ? '> ' : '  '
+      marker = i == @index ? '→ ' : '  '
       color = case item[:status]
-              when 'M ' then 220  # Modified
-              when ' M' then 214  # Modified, not staged
-              when 'A ' then 154  # Added
+              when 'M ' then 220  # Modified (staged)
+              when ' M' then 214  # Modified (not staged)
+              when 'MM' then 202  # Modified (staged and unstaged)
+              when 'A ' then 154  # Added (new file staged)
               when 'D ' then 196  # Deleted
+              when ' D' then 196  # Deleted (not staged)
               when '??' then 245  # Untracked
+              when 'R ' then 51   # Renamed
+              when 'C ' then 51   # Copied
               else 255
               end
-      content += marker + item[:status].fg(color) + ' ' + item[:file] + "\n"
+      
+      # Add helpful status descriptions
+      status_desc = case item[:status]
+                    when 'M ' then '(staged)'
+                    when ' M' then '(modified)'
+                    when 'MM' then '(staged+modified)'
+                    when 'A ' then '(new file)'
+                    when 'D ' then '(deleted)'
+                    when ' D' then '(deleted)'
+                    when '??' then '(untracked)'
+                    when 'R ' then '(renamed)'
+                    when 'C ' then '(copied)'
+                    else ''
+                    end
+      
+      content += marker + item[:status].fg(color) + ' ' + item[:file] + ' ' + status_desc.fg(242) + "\n"
     end
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
   
   # Show diff in right pane if file selected
   show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
@@ -267,6 +551,7 @@ end
 def git_log
   @mode = :log
   @log_entries = []
+  @p_left.ix = 0  # Reset scroll position
   
   log = `git log --oneline -50 2>/dev/null`.lines
   log.each do |line|
@@ -281,16 +566,21 @@ def git_log
 end
 
 def display_log
-  content = "Git Log\n".b.fg(156)
-  content += ('=' * 30) + "\n\n"
+  # Update top pane with mode
+  update_mode_info('Git Log')
+  
+  content = ""
   
   @log_entries.each_with_index do |entry, i|
-    marker = i == @index ? '> ' : '  '
+    marker = i == @index ? '→ ' : '  '
     content += marker + entry[:hash].fg(220) + ' ' + entry[:message] + "\n"
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
   
   # Show commit details in right pane
   show_commit_details(@log_entries[@index][:hash]) if @index >= 0 && @index < @log_entries.length
@@ -306,6 +596,7 @@ end
 def git_branches
   @mode = :branches
   @branches = []
+  @p_left.ix = 0  # Reset scroll position
   
   branches = `git branch -a 2>/dev/null`.lines
   branches.each do |branch|
@@ -322,11 +613,13 @@ def git_branches
 end
 
 def display_branches
-  content = "Git Branches\n".b.fg(156)
-  content += ('=' * 30) + "\n\n"
+  # Update top pane with mode
+  update_mode_info('Git Branches')
+  
+  content = ""
   
   @branches.each_with_index do |branch, i|
-    marker = i == @index ? '> ' : '  '
+    marker = i == @index ? '→ ' : '  '
     content += if branch[:current]
                  marker + '* ' + branch[:name].fg(154) + "\n"
                else
@@ -334,8 +627,11 @@ def display_branches
                end
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
 end
 
 def git_pull
@@ -352,27 +648,127 @@ def git_push
 end
 
 # GITHUB FUNCTIONS {{{1
+def verify_github_token
+  # First check if we have a token loaded
+  if @github_token.empty?
+    @p_bottom.say('No GitHub token found in memory. Press T to set up token.')
+    return false
+  end
+  
+  @p_bottom.say("Verifying GitHub token (#{@github_token[0..7]}...)...")
+  result = github_request('/user')
+  
+  if result.is_a?(Hash) && result[:error]
+    @p_bottom.say("Token verification failed: #{result[:error]}")
+    return false
+  elsif result.is_a?(Hash) && result['login']
+    @p_bottom.say("✓ Token valid for user: #{result['login']}")
+    return true
+  else
+    @p_bottom.say('Token verification returned unexpected format')
+    return false
+  end
+end
+
 def github_request(endpoint)
   return { error: 'No GitHub token found. Set GITHUB_TOKEN environment variable.' } if @github_token.empty?
   
+  # Always prefer curl when available due to chunked encoding issues with Net::HTTP
+  if system('command -v curl >/dev/null 2>&1')
+    result = github_request_curl(endpoint)
+    # Only fall back to Net::HTTP for non-auth errors and non-chunked encoding errors
+    if result.is_a?(Hash) && result[:error] && !result[:error].include?('JSON')
+      log_debug("curl failed: #{result[:error]}")
+      # Don't fallback for now - curl is more reliable
+    end
+    return result
+  end
+  
+  # If curl is not available, use Net::HTTP
+  github_request_http(endpoint)
+end
+
+def github_request_http(endpoint)
   begin
     uri = URI.parse("https://api.github.com#{endpoint}")
+    
+    # More robust HTTPS setup
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    http.read_timeout = 15  # Increased timeout
+    http.open_timeout = 10  # Increased connection timeout
+    http.keep_alive_timeout = 2
     
-    request = Net::HTTP::Get.new(uri)
-    request['Authorization'] = "token #{@github_token}"
-    request['Accept'] = 'application/vnd.github.v3+json'
-    
-    response = http.request(request)
-    
-    if response.code == '200'
-      JSON.parse(response.body)
-    else
-      { error: "Request failed: #{response.code}" }
+    # Ensure we start fresh connection
+    http.start do |connection|
+      request = Net::HTTP::Get.new(uri)
+      request['Authorization'] = "token #{@github_token}"
+      request['Accept'] = 'application/vnd.github.v3+json'
+      request['User-Agent'] = 'GiTerm/1.0'
+      request['Connection'] = 'close'  # Force connection close to avoid keep-alive issues
+      
+      response = connection.request(request)
+      
+      if response.code == '200'
+        # Handle chunked encoding issues by reading body carefully
+        body = response.body
+        return { error: 'Empty response body' } if body.nil? || body.empty?
+
+        JSON.parse(body)
+      else
+        { error: "GitHub API error: #{response.code} - #{response.message}" }
+      end
     end
+  rescue JSON::ParserError => e
+    { error: "Invalid JSON response: #{e.message}" }
+  rescue Net::ReadTimeout, Net::OpenTimeout => e
+    { error: "Request timeout: #{e.message}" }
+  rescue EOFError
+    { error: 'Connection terminated unexpectedly. Try again.' }
+  rescue OpenSSL::SSL::SSLError => e
+    { error: "SSL connection error: #{e.message}" }
+  rescue Net::HTTPBadResponse, Net::ProtocolError => e
+    { error: "HTTP protocol error (chunked encoding issue): #{e.message}" }
   rescue => e
-    { error: e.message }
+    { error: "Network error: #{e.message}" }
+  end
+end
+
+def github_request_curl(endpoint)
+  begin
+    # Build curl command as a string to ensure proper formatting
+    url = "https://api.github.com#{endpoint}"
+    curl_cmd = "curl -s -f --max-time 10 " \
+               "-H 'Authorization: token #{@github_token}' " \
+               "-H 'Accept: application/vnd.github.v3+json' " \
+               "-H 'User-Agent: GiTerm/1.0' " \
+               "'#{url}'"
+    
+    # Debug: log the curl command (without showing full token)
+    debug_cmd = curl_cmd.sub(@github_token, "#{@github_token[0..10]}...")
+    log_debug("Executing curl: #{debug_cmd}")
+    
+    # Capture both stdout and stderr for better debugging
+    result = `#{curl_cmd} 2>&1`
+    exit_code = $?.exitstatus
+    
+    if exit_code == 0 && !result.empty?
+      JSON.parse(result)
+    else
+      error_msg = case exit_code
+                  when 22 then 'HTTP error (likely 401/403 - check token)'
+                  when 6 then 'Could not resolve host (network issue)'
+                  when 7 then 'Failed to connect (network issue)'
+                  when 28 then 'Operation timeout'
+                  else "curl failed (exit code: #{exit_code})"
+                  end
+      { error: "#{error_msg}. Response: #{result[0..100]}" }
+    end
+  rescue JSON::ParserError => e
+    { error: "Invalid JSON from curl: #{e.message}" }
+  rescue => e
+    { error: "curl error: #{e.message}" }
   end
 end
 
@@ -380,10 +776,52 @@ def github_repos
   @mode = :github_repos
   @github_repos = []
   
+  # Restore saved index for this mode
+  restore_mode_index(:github_repos)
+  
+  # Show loading message
+  @p_bottom.say('Loading GitHub repositories...')
+  
+  if @github_token.empty?
+    content = "GitHub Integration Setup\n".b.fg(156)
+    content += ('=' * 35) + "\n\n"
+    content += "[!] No GitHub token found\n\n".fg(196)
+    
+    content += "To access GitHub features, you need a\n".fg(249)
+    content += "Personal Access Token.\n\n".fg(249)
+    
+    content += "QUICK SETUP:\n".fg(154)
+    content += '1. Press '.fg(249) + "'T'".fg(51) + " for guided setup\n".fg(249)
+    content += "2. Follow the step-by-step instructions\n".fg(249)
+    content += "3. Create token with 'repo' permissions\n".fg(249)
+    content += "4. Paste token and you're done!\n\n".fg(249)
+    
+    content += "ALTERNATIVE:\n".fg(214)
+    content += "Set GITHUB_TOKEN environment variable\n".fg(249)
+    content += "export GITHUB_TOKEN=ghp_your_token\n\n".fg(242)
+    
+    content += "Why do I need this?\n".fg(220)
+    content += "• View your repositories\n".fg(249)
+    content += "• Browse issues and pull requests\n".fg(249)
+    content += "• Access private repos you own\n".fg(249)
+    content += "• Get more API requests (5000/hr vs 60/hr)\n".fg(249)
+    
+    @p_left.say(content)
+    return
+  end
+  
   result = github_request('/user/repos?per_page=100')
   
-  if result[:error]
-    @p_left.say(result[:error].fg(196))
+  if result.is_a?(Hash) && result[:error]
+    @p_left.say("GitHub Error: #{result[:error]}".fg(196))
+    @p_bottom.say('Failed to load repositories. Press any key to continue...')
+    return
+  end
+  
+  # Ensure result is an array
+  unless result.is_a?(Array)
+    @p_left.say('Invalid response format from GitHub API'.fg(196))
+    @p_bottom.say('GitHub API returned unexpected data format')
     return
   end
   
@@ -393,43 +831,236 @@ def github_repos
       full_name: repo['full_name'],
       description: repo['description'],
       private: repo['private'],
-      updated_at: repo['updated_at']
+      language: repo['language'],
+      stargazers_count: repo['stargazers_count'],
+      forks_count: repo['forks_count'],
+      open_issues_count: repo['open_issues_count'],
+      updated_at: repo['updated_at'],
+      clone_url: repo['clone_url']
     }
   end
   
   @max_index = @github_repos.length - 1
   @min_index = 0
-  @index = 0 if @index > @max_index
   
+  # Ensure restored index is within bounds
+  @index = [@index, @max_index].min if @max_index >= 0
+  @index = [@index, @min_index].max
+  
+  # Update bottom pane to show legends instead of loading message
+  update_bottom_legends
+  
+  # Mark panes for update using RTFM pattern
+  @p_left.update = true
+  @p_right.update = true
+  
+  # Display GitHub repos and update right pane with first repository
   display_github_repos
+  update_right_pane(false)  # false = not fast = immediate extended fetch for mode switch
 end
 
 def display_github_repos
-  content = "GitHub Repositories\n".b.fg(156)
-  content += ('=' * 30) + "\n\n"
+  # Update top pane with mode
+  update_mode_info('GitHub Repositories')
+  
+  content = ""
   
   @github_repos.each_with_index do |repo, i|
-    marker = i == @index ? '> ' : '  '
+    marker = i == @index ? '→ ' : '  '
     privacy = repo[:private] ? '[P]'.fg(196) : '[O]'.fg(154)
-    content += marker + privacy + ' ' + repo[:name].fg(51) + "\n"
+    
+    # Color code by organization/owner
+    full_name = repo[:full_name] || 'unknown/unknown'
+    owner, name = full_name.split('/', 2)
+    owner_color = get_owner_color(owner)
+    
+    content += marker + privacy + ' ' + owner.fg(owner_color) + '/'.fg(245) + name.fg(255) + "\n"
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
   
-  # Show repo details in right pane
-  show_repo_details(@github_repos[@index]) if @index >= 0 && @index < @github_repos.length
+  # Right pane will be updated separately by the calling code
 end
 
-def show_repo_details(repo)
-  content = repo[:full_name].b.fg(156) + "\n"
-  content += ('=' * 40) + "\n\n"
+def show_repo_details(repo, immediate_extended_fetch = false)
+  return unless repo
+  
+  log_debug("Showing repo details for: #{repo[:full_name] || 'nil'} (immediate: #{immediate_extended_fetch})")
+  
+  # Always show basic info immediately
+  display_basic_repo_info(repo)
+  
+  if immediate_extended_fetch
+    # Fetch extended content right now (for initial display or full refresh)
+    log_debug("Fetching extended content immediately for: #{repo[:full_name]}")
+    fetch_and_display_extended_content(repo)
+  else
+    # Schedule for delayed fetch (for fast navigation)
+    log_debug("Scheduling extended fetch for: #{repo[:full_name]}")
+    schedule_extended_fetch(repo)
+  end
+end
+
+def display_basic_repo_info(repo)
+  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content += ('=' * 60) + "\n\n"
+  
+  # Basic repo info with nil protection (always shown immediately)
   content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
   content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
-  content += 'Updated: '.fg(249) + repo[:updated_at] + "\n"
+  content += 'Language: '.fg(249) + (repo[:language] || 'Not specified') + "\n"
+  content += 'Stars: '.fg(249) + (repo[:stargazers_count] || 0).to_s + "  "
+  content += 'Forks: '.fg(249) + (repo[:forks_count] || 0).to_s + "  "
+  content += 'Issues: '.fg(249) + (repo[:open_issues_count] || 0).to_s + "\n"
+  content += 'Updated: '.fg(249) + (repo[:updated_at] || 'Unknown') + "\n"
+  content += 'Clone URL: '.fg(249) + (repo[:clone_url] || 'Not available') + "\n\n"
   
   @p_right.clear
   @p_right.say(content)
+end
+
+def schedule_extended_fetch(repo)
+  # Store the repo for delayed fetching - will be handled in main loop
+  log_debug("Scheduling extended fetch for: #{repo[:full_name]}")
+  @pending_extended_fetch = repo
+  log_debug("@pending_extended_fetch now set to: #{@pending_extended_fetch[:full_name]}")
+end
+
+def fetch_and_display_extended_content(repo)
+  return unless repo[:full_name]
+  
+  log_debug("EXECUTING fetch_and_display_extended_content for: #{repo[:full_name]}")
+  
+  # Build the basic content again
+  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content += ('=' * 60) + "\n\n"
+  
+  content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
+  content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
+  content += 'Language: '.fg(249) + (repo[:language] || 'Not specified') + "\n"
+  content += 'Stars: '.fg(249) + (repo[:stargazers_count] || 0).to_s + "  "
+  content += 'Forks: '.fg(249) + (repo[:forks_count] || 0).to_s + "  "
+  content += 'Issues: '.fg(249) + (repo[:open_issues_count] || 0).to_s + "\n"
+  content += 'Updated: '.fg(249) + (repo[:updated_at] || 'Unknown') + "\n"
+  content += 'Clone URL: '.fg(249) + (repo[:clone_url] || 'Not available') + "\n\n"
+  
+  # Fetch README
+  readme_content = fetch_readme(repo[:full_name])
+  if readme_content
+    content += "README.md".b.fg(154) + "\n"
+    content += ('-' * 20) + "\n"
+    content += readme_content + "\n\n"
+  end
+  
+  # Fetch directory structure
+  files_content = fetch_repo_files(repo[:full_name])
+  if files_content
+    content += "Repository Files".b.fg(154) + "\n" 
+    content += ('-' * 20) + "\n"
+    content += files_content
+  end
+  
+  # Update the pane (now safe - no threads)
+  @p_right.clear
+  @p_right.say(content)
+rescue => e
+  log_debug("Error in extended fetch: #{e.message}")
+end
+
+def fetch_readme(repo_full_name)
+  return nil unless repo_full_name
+  
+  # Try different README variations
+  readme_files = ['README.md', 'readme.md', 'README.txt', 'README', 'readme.txt']
+  
+  readme_files.each do |filename|
+    begin
+      result = github_request("/repos/#{repo_full_name}/contents/#{filename}")
+      next if result.is_a?(Hash) && result[:error]
+      
+      # Decode base64 content
+      if result.is_a?(Hash) && result['content'] && result['encoding'] == 'base64'
+        decoded = Base64.decode64(result['content'].gsub(/\s/, ''))
+        # Handle encoding issues
+        decoded = decoded.force_encoding('UTF-8')
+        unless decoded.valid_encoding?
+          decoded = decoded.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '?')
+        end
+        # Limit README display to avoid overwhelming the pane
+        return decoded.lines.first(20).join.strip
+      end
+    rescue => e
+      log_debug("Error fetching README #{filename}: #{e.message}")
+      next
+    end
+  end
+  
+  nil
+end
+
+def fetch_repo_files(repo_full_name, path = '')
+  return nil unless repo_full_name
+  
+  begin
+    result = github_request("/repos/#{repo_full_name}/contents/#{path}")
+    return nil if result.is_a?(Hash) && result[:error]
+    return nil unless result.is_a?(Array)
+    
+    content = ""
+    files = []
+    dirs = []
+    
+    # Separate files and directories
+    result.each do |item|
+      next unless item.is_a?(Hash) && item['name']
+      
+      if item['type'] == 'dir'
+        dirs << item
+      else
+        files << item
+      end
+    end
+    
+    # Show directories first, then files
+    (dirs + files).each do |item|
+      icon = case item['type']
+             when 'dir' then '📁'
+             when 'file'
+               case File.extname(item['name']).downcase
+               when '.md' then '📄'
+               when '.rb' then '💎'
+               when '.py' then '🐍'
+               when '.js' then '📜'
+               when '.json' then '⚙️'
+               when '.yml', '.yaml' then '⚙️'
+               else '📄'
+               end
+             else '❓'
+             end
+      
+      size_info = item['size'] ? " (#{format_file_size(item['size'])})" : ""
+      content += "#{icon} #{item['name']}#{size_info}\n"
+    end
+    
+    content.empty? ? nil : content
+  rescue => e
+    log_debug("Error fetching repo files: #{e.message}")
+    nil
+  end
+end
+
+def format_file_size(bytes)
+  return "0 B" if bytes == 0
+  
+  units = ['B', 'KB', 'MB', 'GB']
+  exp = (Math.log(bytes) / Math.log(1024)).floor
+  exp = [exp, units.length - 1].min
+  
+  "%.1f %s" % [bytes.to_f / (1024 ** exp), units[exp]]
 end
 
 def github_issues
@@ -464,25 +1095,33 @@ def github_issues
   @min_index = 0
   @index = 0 if @index > @max_index
   
+  # Update bottom pane to show legends
+  update_bottom_legends
+  
   display_github_issues
 end
 
 def display_github_issues
-  content = "Issues - #{@selected_repo}\n".b.fg(156)
-  content += ('=' * 40) + "\n\n"
+  # Update top pane with mode
+  update_mode_info("GitHub Issues - #{@selected_repo}")
+  
+  content = ""
   
   if @github_issues.empty?
     content += 'No open issues'.fg(245)
   else
     @github_issues.each_with_index do |issue, i|
-      marker = i == @index ? '> ' : '  '
+      marker = i == @index ? '→ ' : '  '
       number = "##{issue[:number]}".fg(220)
       content += marker + number + ' ' + issue[:title] + "\n"
     end
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
   
   # Show issue details in right pane
   show_issue_details(@github_issues[@index]) if @index >= 0 && @index < @github_issues.length
@@ -542,25 +1181,33 @@ def github_pull_requests
   @min_index = 0
   @index = 0 if @index > @max_index
   
+  # Update bottom pane to show legends
+  update_bottom_legends
+  
   display_github_prs
 end
 
 def display_github_prs
-  content = "Pull Requests - #{@selected_repo}\n".b.fg(156)
-  content += ('=' * 40) + "\n\n"
+  # Update top pane with mode
+  update_mode_info("Pull Requests - #{@selected_repo}")
+  
+  content = ""
   
   if @github_prs.empty?
     content += 'No open pull requests'.fg(245)
   else
     @github_prs.each_with_index do |pr, i|
-      marker = i == @index ? '> ' : '  '
+      marker = i == @index ? '→ ' : '  '
       number = "##{pr[:number]}".fg(220)
       content += marker + number + ' ' + pr[:title] + "\n"
     end
   end
   
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
   @p_left.clear
   @p_left.say(content)
+  @p_left.ix = saved_ix
   
   # Show PR details in right pane
   show_pr_details(@github_prs[@index]) if @index >= 0 && @index < @github_prs.length
@@ -594,10 +1241,200 @@ def current_repo
   end
 end
 
+# GITHUB SEARCH {{{1
+def github_search_repositories
+  # Use bottom pane for search input (cleaner than popup)
+  @p_bottom.clear
+  @p_bottom.say("Search GitHub repositories: ")
+  
+  query = ""
+  loop do
+    chr = getchr
+    case chr
+    when 'ENTER'
+      break
+    when 'ESCAPE'
+      @p_bottom.clear
+      update_bottom_legends
+      return
+    when 'BACKSPACE'
+      query.chop!
+      @p_bottom.clear
+      @p_bottom.say("Search GitHub repositories: #{query}")
+    else
+      if chr && chr.length == 1
+        query += chr
+        @p_bottom.clear
+        @p_bottom.say("Search GitHub repositories: #{query}")
+      end
+    end
+  end
+  
+  return if query.empty?
+  
+  @mode = :github_search
+  @github_search_results = []
+  @index = 0
+  
+  # Perform the search
+  result = github_request("/search/repositories?q=#{CGI.escape(query)}&sort=stars&order=desc&per_page=50")
+  
+  if result[:error]
+    @p_left.clear
+    @p_left.say("Search Error: #{result[:error]}".fg(196))
+    return
+  end
+  
+  # Process search results
+  if result['items'] && result['items'].any?
+    result['items'].each do |repo|
+      @github_search_results << {
+        id: repo['id'],
+        name: repo['name'],
+        full_name: repo['full_name'],
+        description: repo['description'],
+        private: repo['private'],
+        language: repo['language'],
+        stargazers_count: repo['stargazers_count'],
+        forks_count: repo['forks_count'],
+        open_issues_count: repo['open_issues_count'],
+        updated_at: repo['updated_at'],
+        clone_url: repo['clone_url'],
+        owner: repo['owner']['login']
+      }
+    end
+    
+    @max_index = @github_search_results.length - 1
+    @min_index = 0
+    @index = 0
+    
+    update_mode_info("Search Results: \"#{query}\"")
+    display_github_search_results
+  else
+    @p_left.clear
+    @p_left.say("No repositories found for: #{query}".fg(245))
+  end
+  
+  update_bottom_legends
+end
+
+def display_github_search_results
+  content = ""
+  
+  @github_search_results.each_with_index do |repo, i|
+    marker = i == @index ? '→ ' : '  '
+    stars = "⭐#{repo[:stargazers_count]}".fg(220)
+    language = repo[:language] ? "[#{repo[:language]}]".fg(51) : ""
+    content += marker + repo[:full_name].fg(156) + " #{stars} #{language}\n"
+  end
+  
+  # Preserve scroll position when updating content
+  saved_ix = @p_left.ix
+  @p_left.clear
+  @p_left.say(content)
+  @p_left.ix = saved_ix
+  
+  # Right pane will be updated separately by the calling code
+end
+
+def show_search_repo_details(repo, immediate_extended_fetch = false)
+  return unless repo
+  
+  log_debug("Showing search repo details for: #{repo[:full_name] || 'nil'} (immediate: #{immediate_extended_fetch})")
+  
+  # Always show basic info immediately
+  display_basic_search_repo_info(repo)
+  
+  if immediate_extended_fetch
+    # Fetch extended content right now (for initial display or full refresh)
+    fetch_and_display_extended_content(repo)
+  else
+    # Schedule for delayed fetch (for fast navigation)
+    schedule_extended_fetch(repo)
+  end
+end
+
+def display_basic_search_repo_info(repo)
+  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content += ('=' * 60) + "\n\n"
+  
+  # Basic repo info with more details for search results (always shown immediately)
+  content += 'Owner: '.fg(249) + (repo[:owner] || 'Unknown') + "\n"
+  content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
+  content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
+  content += 'Language: '.fg(249) + (repo[:language] || 'Not specified') + "\n"
+  content += 'Stars: '.fg(249) + (repo[:stargazers_count] || 0).to_s + "  "
+  content += 'Forks: '.fg(249) + (repo[:forks_count] || 0).to_s + "  "
+  content += 'Issues: '.fg(249) + (repo[:open_issues_count] || 0).to_s + "\n"
+  content += 'Updated: '.fg(249) + (repo[:updated_at] || 'Unknown') + "\n"
+  content += 'Clone URL: '.fg(249) + (repo[:clone_url] || 'Not available') + "\n\n"
+  
+  @p_right.clear
+  @p_right.say(content)
+end
+
 # KEY BINDINGS {{{1
 def getkey
-  chr = getchr(1)
+  # If we have pending extended fetch, go straight to timeout logic
+  log_debug("Checking pending fetch: #{@pending_extended_fetch ? @pending_extended_fetch[:full_name] : 'none'}")
+  if @pending_extended_fetch
+    # Wait up to 0.5 seconds for either a key press or timeout for extended fetch
+    log_debug("Waiting for key or extended fetch timeout: #{@pending_extended_fetch[:full_name]}")
+    chr = getchr(0.5)
+    
+    if chr
+      # Key pressed during wait - cancel extended fetch and return key
+      log_debug("Key pressed during wait, cancelling extended fetch")
+      @pending_extended_fetch = nil
+      return chr
+    else
+      # Timeout reached - perform extended fetch
+      repo = @pending_extended_fetch
+      @pending_extended_fetch = nil
+      log_debug("Timeout reached, fetching extended content for: #{repo[:full_name]}")
+      
+      # Check if we're still on the same repo
+      current_repo = case @mode
+                     when :github_repos
+                       @github_repos[@index] if @index >= 0 && @index < @github_repos.length
+                     when :github_search
+                       @github_search_results[@index] if @index >= 0 && @index < @github_search_results.length
+                     end
+      
+      log_debug("Repo comparison: current=#{current_repo ? current_repo[:full_name] : 'nil'}, pending=#{repo[:full_name]}")
+      
+      if current_repo && current_repo[:full_name] == repo[:full_name]
+        log_debug("Still on same repo, fetching extended content")
+        fetch_and_display_extended_content(repo)
+      else
+        log_debug("Repo changed, skipping extended fetch")
+      end
+      
+      # Now wait for the next actual user input
+      chr = getchr  # Block until user presses a key
+      log_debug("Post-fetch key: #{chr}")
+      return chr
+    end
+  else
+    # No pending fetch - check for immediate key, then wait if needed
+    chr = getchr(0)  # 0 timeout = non-blocking check
+    
+    if chr
+      log_debug("Immediate key (no pending fetch): #{chr}")
+      return chr
+    else
+      # No immediate key - wait for input normally
+      chr = getchr  # Block until user presses a key
+      log_debug("Normal key: #{chr}")
+      return chr
+    end
+  end
+end
+
+def handle_key(chr)
   return unless chr
+  
+  log_debug("Key received: '#{chr}' (length: #{chr.length})")
   
   case chr
   when '?'
@@ -611,11 +1448,165 @@ def getkey
   when 'k', 'UP'
     move_up
   when 'g', 'HOME'
+    old_index = @index
     @index = @min_index
-    refresh_view
+    
+    # Position pane at the top
+    @p_left.ix = 0
+    
+    # Update left pane content directly instead of full refresh
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+    
+    # Use fast update for major jumps to avoid extended fetch delays
+    update_right_pane(true)
   when 'G', 'END'
+    old_index = @index
     @index = @max_index
-    refresh_view
+    
+    # Position pane to show the last item
+    pane_height = @p_left.h - 2  # Account for border
+    total_items = @max_index + 1
+    if total_items > pane_height
+      @p_left.ix = total_items - pane_height
+    else
+      @p_left.ix = 0
+    end
+    
+    # Update left pane content directly instead of full refresh
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+    
+    # Use fast update for major jumps to avoid extended fetch delays
+    update_right_pane(true)
+  when 'PgDOWN'
+    # Page down in left pane
+    old_index = @index
+    @index = [@index + @p_left.h - 3, @max_index].min
+    
+    # Calculate where the selection should be visible and set scroll position
+    target_line = @index
+    pane_height = @p_left.h - 2  # Account for border
+    
+    # If the new index is beyond what's currently visible, scroll to show it
+    if target_line >= @p_left.ix + pane_height
+      @p_left.ix = [target_line - pane_height + 1, 0].max
+    elsif target_line < @p_left.ix
+      @p_left.ix = target_line
+    end
+    
+    # Update left pane content directly instead of full refresh
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+    
+    # Show basic info immediately, schedule extended fetch for when user pauses  
+    update_right_pane(true)
+  when 'PgUP'
+    # Page up in left pane
+    old_index = @index
+    @index = [@index - @p_left.h + 3, @min_index].max
+    
+    # Calculate where the selection should be visible and set scroll position
+    target_line = @index
+    pane_height = @p_left.h - 2  # Account for border
+    
+    # If the new index is beyond what's currently visible, scroll to show it
+    if target_line >= @p_left.ix + pane_height
+      @p_left.ix = [target_line - pane_height + 1, 0].max
+    elsif target_line < @p_left.ix
+      @p_left.ix = target_line
+    end
+    
+    # Update left pane content directly instead of full refresh
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+    
+    # Show basic info immediately, schedule extended fetch for when user pauses  
+    update_right_pane(true)
+  when 'S-RIGHT'
+    log_debug("S-RIGHT pressed - right pane pagedown")
+    # Use full page height for more obvious scrolling
+    page_height = @p_right.h - 2  # Account for borders
+    @p_right.ix = [@p_right.ix + page_height, @p_right.text.split("\n").length - @p_right.h].min
+    @p_right.refresh
+  when 'S-LEFT'
+    log_debug("S-LEFT pressed - right pane pageup") 
+    # Use full page height for more obvious scrolling  
+    page_height = @p_right.h - 2  # Account for borders
+    @p_right.ix = [@p_right.ix - page_height, 0].max
+    @p_right.refresh
+  when 'S-DOWN'  # Shift-Down for line down in right pane
+    @p_right.linedown
+  when 'S-UP'    # Shift-Up for line up in right pane
+    @p_right.lineup
+  when 'J'  # Capital J for line down in right pane
+    @p_right.linedown
+  when 'K'  # Capital K for line up in right pane
+    @p_right.lineup
+  when 'w'
+    change_width
+  when 'T'  # Capital T for Token setup
+    github_token_popup
+  when 'V'  # Capital V for Verify token
+    verify_github_token
+  when 'O'  # Capital O for Open token page
+    open_github_token_page
   when 's'
     git_status
   when 'd'
@@ -630,7 +1621,14 @@ def getkey
   when 'b'
     git_branches
   when 'TAB'
-    github_repos
+    # Toggle between Git and GitHub modes with index memory
+    save_current_index  # Save current position
+    
+    if @mode.to_s.start_with?('github')
+      git_status  # Go back to local Git
+    else
+      github_repos  # Switch to GitHub
+    end
   when 'i'
     if @mode.to_s.start_with?('github')
       github_issues
@@ -652,6 +1650,8 @@ def getkey
     unstage_file if @mode == :status
   when 'c'
     commit_changes
+  when '/'
+    github_search_repositories
   when ':'
     command_mode
   when '!'
@@ -660,13 +1660,442 @@ def getkey
 end
 
 def move_down
-  @index = @index >= @max_index ? @min_index : @index + 1
-  refresh_view
+  old_index = @index
+  
+  if @index >= @max_index
+    @index = @min_index
+    @p_left.ix = 0  # Jump to top of pane
+    
+    # Full display update needed for wrapping
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+  else
+    @index += 1
+    if @index - @p_left.ix >= @p_left.h - 3  # Near bottom with scrolloff
+      @p_left.linedown
+      
+      # Full display update needed for scrolling
+      case @mode
+      when :github_repos
+        display_github_repos
+      when :github_search  
+        display_github_search_results
+      when :status
+        display_status
+      when :log
+        display_log
+      when :branches
+        display_branches
+      when :github_issues
+        display_github_issues
+      when :github_prs
+        display_github_prs
+      end
+    else
+      # Only update the selection markers without full refresh
+      update_selection_only(old_index, @index)
+    end
+  end
+  
+  # Schedule extended fetch for when user pauses
+  log_debug("Navigation: calling update_right_pane(true) for scheduling")
+  update_right_pane(true)
 end
 
 def move_up
-  @index = @index <= @min_index ? @max_index : @index - 1
+  old_index = @index
+  
+  if @index <= @min_index
+    @index = @max_index
+    # Calculate proper scroll position for bottom
+    pane_height = @p_left.h - 2
+    total_items = @max_index + 1
+    if total_items > pane_height
+      @p_left.ix = total_items - pane_height
+    else
+      @p_left.ix = 0
+    end
+    
+    # Full display update needed for wrapping
+    case @mode
+    when :github_repos
+      display_github_repos
+    when :github_search  
+      display_github_search_results
+    when :status
+      display_status
+    when :log
+      display_log
+    when :branches
+      display_branches
+    when :github_issues
+      display_github_issues
+    when :github_prs
+      display_github_prs
+    end
+  else
+    @index -= 1
+    if @index - @p_left.ix < 3  # Near top with scrolloff
+      @p_left.lineup
+      
+      # Full display update needed for scrolling
+      case @mode
+      when :github_repos
+        display_github_repos
+      when :github_search  
+        display_github_search_results
+      when :status
+        display_status
+      when :log
+        display_log
+      when :branches
+        display_branches
+      when :github_issues
+        display_github_issues
+      when :github_prs
+        display_github_prs
+      end
+    else
+      # Only update the selection markers without full refresh
+      update_selection_only(old_index, @index)
+    end
+  end
+  
+  # Schedule extended fetch for when user pauses
+  log_debug("Navigation: calling update_right_pane(true) for scheduling")
+  update_right_pane(true)
+end
+
+def update_display
+  # Update the left pane to show new selection
   refresh_view
+  # Update the right pane content
+  update_right_pane
+end
+
+# Optimized method to update only selection markers without full refresh
+def update_selection_only(old_index, new_index)
+  return if old_index == new_index
+  
+  case @mode
+  when :status
+    update_status_selection(old_index, new_index)
+  when :github_repos
+    update_github_repos_selection(old_index, new_index)
+  when :github_issues
+    update_github_issues_selection(old_index, new_index)
+  when :github_prs
+    update_github_prs_selection(old_index, new_index)
+  when :github_search
+    update_github_search_selection(old_index, new_index)
+  when :log
+    update_log_selection(old_index, new_index)
+  when :branches
+    update_branches_selection(old_index, new_index)
+  end
+end
+
+def update_status_selection(old_index, new_index)
+  return if @status_items.empty?
+  
+  # Build the two lines we need to update
+  lines_to_update = []
+  
+  # Update old selection (remove marker)
+  if old_index >= 0 && old_index < @status_items.length
+    item = @status_items[old_index]
+    color = get_status_color(item[:status])
+    status_desc = get_status_desc(item[:status])
+    old_line = '  ' + item[:status].fg(color) + ' ' + item[:file] + ' ' + status_desc.fg(242)
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection (add marker)
+  if new_index >= 0 && new_index < @status_items.length
+    item = @status_items[new_index]
+    color = get_status_color(item[:status])
+    status_desc = get_status_desc(item[:status])
+    new_line = '→ ' + item[:status].fg(color) + ' ' + item[:file] + ' ' + status_desc.fg(242)
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  # Update the specific lines in the pane without full refresh
+  update_pane_lines(lines_to_update)
+end
+
+def update_github_repos_selection(old_index, new_index)
+  return if @github_repos.empty?
+  
+  lines_to_update = []
+  
+  # Update old selection (remove marker)
+  if old_index >= 0 && old_index < @github_repos.length
+    repo = @github_repos[old_index]
+    privacy = repo[:private] ? '[P]'.fg(196) : '[O]'.fg(154)
+    
+    # Use the same color scheme as display_github_repos
+    full_name = repo[:full_name] || 'unknown/unknown'
+    owner, name = full_name.split('/', 2)
+    owner_color = get_owner_color(owner)
+    
+    old_line = '  ' + privacy + ' ' + owner.fg(owner_color) + '/'.fg(245) + name.fg(255)
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection (add marker)
+  if new_index >= 0 && new_index < @github_repos.length
+    repo = @github_repos[new_index]
+    privacy = repo[:private] ? '[P]'.fg(196) : '[O]'.fg(154)
+    
+    # Use the same color scheme as display_github_repos
+    full_name = repo[:full_name] || 'unknown/unknown'
+    owner, name = full_name.split('/', 2)
+    owner_color = get_owner_color(owner)
+    
+    new_line = '→ ' + privacy + ' ' + owner.fg(owner_color) + '/'.fg(245) + name.fg(255)
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  update_pane_lines(lines_to_update)
+end
+
+def update_github_issues_selection(old_index, new_index)
+  return if @github_issues.empty?
+  
+  lines_to_update = []
+  
+  # Update old selection
+  if old_index >= 0 && old_index < @github_issues.length
+    issue = @github_issues[old_index]
+    number = "##{issue[:number]}".fg(220)
+    old_line = '  ' + number + ' ' + issue[:title]
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection
+  if new_index >= 0 && new_index < @github_issues.length
+    issue = @github_issues[new_index]
+    number = "##{issue[:number]}".fg(220)
+    new_line = '→ ' + number + ' ' + issue[:title]
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  update_pane_lines(lines_to_update)
+end
+
+def update_github_prs_selection(old_index, new_index)
+  return if @github_prs.empty?
+  
+  lines_to_update = []
+  
+  # Update old selection
+  if old_index >= 0 && old_index < @github_prs.length
+    pr = @github_prs[old_index]
+    number = "##{pr[:number]}".fg(220)
+    old_line = '  ' + number + ' ' + pr[:title]
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection
+  if new_index >= 0 && new_index < @github_prs.length
+    pr = @github_prs[new_index]
+    number = "##{pr[:number]}".fg(220)
+    new_line = '→ ' + number + ' ' + pr[:title]
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  update_pane_lines(lines_to_update)
+end
+
+def update_log_selection(old_index, new_index)
+  # Implement if needed for log mode
+  refresh_view
+end
+
+def update_branches_selection(old_index, new_index)
+  # Implement if needed for branches mode
+  refresh_view
+end
+
+def update_github_search_selection(old_index, new_index)
+  return if @github_search_results.empty?
+  
+  lines_to_update = []
+  
+  # Update old selection (remove marker)
+  if old_index >= 0 && old_index < @github_search_results.length
+    repo = @github_search_results[old_index]
+    stars = "⭐#{repo[:stargazers_count]}".fg(220)
+    language = repo[:language] ? "[#{repo[:language]}]".fg(51) : ""
+    old_line = '  ' + repo[:full_name].fg(156) + " #{stars} #{language}"
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection (add marker)
+  if new_index >= 0 && new_index < @github_search_results.length
+    repo = @github_search_results[new_index]
+    stars = "⭐#{repo[:stargazers_count]}".fg(220)
+    language = repo[:language] ? "[#{repo[:language]}]".fg(51) : ""
+    new_line = '→ ' + repo[:full_name].fg(156) + " #{stars} #{language}"
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  update_pane_lines(lines_to_update)
+end
+
+# Helper method to update specific lines in the left pane
+def update_pane_lines(lines_to_update)
+  return if lines_to_update.empty?
+  
+  # Get current pane content lines
+  current_content = @p_left.text.split("\n")
+  
+  # Update the specific lines
+  lines_to_update.each do |line_update|
+    index = line_update[:index]
+    content = line_update[:content]
+    
+    # Make sure we're within bounds
+    if index >= 0 && index < current_content.length
+      current_content[index] = content
+    end
+  end
+  
+  # Set the updated content without clearing (uses rcurses diff-based refresh)
+  new_content = current_content.join("\n")
+  @p_left.text = new_content
+  @p_left.refresh  # This uses the optimized diff-based refresh
+end
+
+# Helper methods for status colors and descriptions
+def get_status_color(status)
+  case status
+  when 'M ' then 220  # Modified (staged)
+  when ' M' then 214  # Modified (not staged)
+  when 'MM' then 202  # Modified (staged and unstaged)
+  when 'A ' then 154  # Added (new file staged)
+  when 'D ' then 196  # Deleted
+  when ' D' then 196  # Deleted (not staged)
+  when '??' then 245  # Untracked
+  when 'R ' then 51   # Renamed
+  when 'C ' then 51   # Copied
+  else 255
+  end
+end
+
+def get_status_desc(status)
+  case status
+  when 'M ' then '(staged)'
+  when ' M' then '(modified)'
+  when 'MM' then '(staged+modified)'
+  when 'A ' then '(new file)'
+  when 'D ' then '(deleted)'
+  when ' D' then '(deleted)'
+  when '??' then '(untracked)'
+  when 'R ' then '(renamed)'
+  when 'C ' then '(copied)'
+  else ''
+  end
+end
+
+def get_owner_color(owner)
+  return 245 unless owner
+  
+  # Expanded color palette for better visual distinction between organizations
+  colors = [
+    51,   # Bright cyan
+    214,  # Orange  
+    156,  # Light green
+    220,  # Yellow
+    141,  # Light purple
+    81,   # Light blue
+    203,  # Pink
+    118,  # Lime green
+    196,  # Red
+    33,   # Dark blue
+    166,  # Orange-red
+    46,   # Green
+    201,  # Magenta
+    226,  # Bright yellow
+    39,   # Cyan-blue
+    129,  # Purple
+    208,  # Dark orange
+    82,   # Bright green
+    99,   # Light purple-blue
+    228   # Bright lime
+  ]
+  
+  # Use a simple hash of the owner name to get consistent color assignment
+  hash = owner.bytes.sum % colors.length
+  colors[hash]
+end
+
+def update_right_pane(fast_update = false)
+  log_debug("Updating right pane for mode: #{@mode}, index: #{@index}, fast: #{fast_update}")
+  
+  case @mode
+  when :status
+    show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+  when :log
+    show_commit_details(@log_entries[@index]) if @index >= 0 && @index < @log_entries.length
+  when :branches
+    # Handle branch details if needed
+  when :github_repos
+    log_debug("GitHub repos mode: showing repo #{@index}/#{@github_repos.length}")
+    show_repo_details(@github_repos[@index], !fast_update) if @index >= 0 && @index < @github_repos.length
+  when :github_issues
+    show_issue_details(@github_issues[@index]) if @index >= 0 && @index < @github_issues.length
+  when :github_prs
+    show_pr_details(@github_prs[@index]) if @index >= 0 && @index < @github_prs.length
+  when :github_search
+    show_search_repo_details(@github_search_results[@index], !fast_update) if @index >= 0 && @index < @github_search_results.length
+  end
+end
+
+def adjust_left_pane_scroll
+  # Implement scroll-off like RTFM/astropanel
+  scrolloff = 3
+  page_height = @p_left.h
+  
+  # Store old scroll position to detect changes
+  old_ix = @p_left.ix
+  
+  # Handle wrapping cases
+  if @index == @max_index && old_ix < @max_index - page_height + 1
+    # When jumping to bottom from top area
+    @p_left.ix = [@max_index - page_height + 1, 0].max
+  elsif @index == @min_index && old_ix > 0
+    # When jumping to top from bottom area
+    @p_left.ix = 0
+  # Normal scrolling with scrolloff
+  elsif @index - @p_left.ix < scrolloff
+    # If index is near the top of visible area
+    @p_left.ix = [@index - scrolloff, 0].max
+  elsif @p_left.ix + page_height - 1 - @index < scrolloff
+    # If index is near the bottom of visible area
+    max_scroll = [@max_index - page_height + 1, 0].max
+    @p_left.ix = [@index + scrolloff - page_height + 1, max_scroll].min
+  end
+  
+  # Debug logging and refresh if scroll changed
+  if @p_left.ix != old_ix
+    log_debug("Scroll adjusted: index=#{@index}, ix=#{@p_left.ix} (was #{old_ix}), height=#{page_height}, max=#{@max_index}")
+    @p_left.refresh  # Force immediate refresh when scroll changes
+  end
 end
 
 def refresh_view
@@ -683,6 +2112,8 @@ def refresh_view
     display_github_issues
   when :github_prs
     display_github_prs
+  when :github_search
+    display_github_search_results
   end
   
   @p_top.update = @p_left.update = @p_right.update = @p_bottom.update = true
@@ -769,10 +2200,35 @@ def command_mode
     end
   end
   
-  # Execute git command
+  # Execute command
   if command.strip.empty?
     @p_bottom.clear
+  elsif command.strip.start_with?('cd ')
+    # Handle directory change
+    path = command.strip[3..]  # Remove 'cd ' prefix
+    path = File.expand_path(path) if path && !path.empty?
+    
+    if path && Dir.exist?(path)
+      begin
+        Dir.chdir(path)
+        @p_bottom.say("Changed to: #{Dir.pwd}")
+        
+        # Check if new directory is a git repo and refresh
+        if system('git rev-parse --git-dir > /dev/null 2>&1')
+          git_status  # Refresh to show new repo
+        else
+          @p_left.clear
+          @p_right.clear
+          @p_left.say("Not a git repository. Use 'git init' to initialize.")
+        end
+      rescue => e
+        @p_bottom.say("Error: #{e.message}")
+      end
+    else
+      @p_bottom.say("Error: Directory '#{path}' does not exist")
+    end
   else
+    # Execute git command
     result = `git #{command} 2>&1`
     @p_right.clear
     @p_right.say(result)
@@ -867,8 +2323,23 @@ def git_diff
   end
 end
 
+def change_width
+  @width_setting += 1
+  @width_setting = 2 if @width_setting > 7
+  
+  left_ratio = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7][@width_setting - 2] || 0.4
+  @p_bottom.say("Width: #{@width_setting} (Left: #{(left_ratio * 100).to_i}%, Right: #{((1 - left_ratio) * 100).to_i}%)")
+  
+  # Save the new setting
+  save_config
+  
+  # Recreate panes with new dimensions
+  init_windows
+  refresh_view
+end
+
 def quit
-  log_debug("Quitting...")
+  log_debug('Quitting...')
   Cursor.show
   Rcurses.clear_screen
   exit 0
@@ -876,63 +2347,68 @@ end
 
 # MAIN LOOP {{{1
 def render
-  # Force refresh all panes for now
-  @p_top.refresh
-  @p_left.refresh
-  @p_right.refresh
-  @p_bottom.refresh
+  # Selective refresh like astropanel/RTFM
+  @p_top.refresh if @p_top.update
+  @p_left.refresh if @p_left.update
+  @p_right.refresh if @p_right.update
+  @p_bottom.refresh if @p_bottom.update
 end
 
 def main_loop
-  log_debug("Entered main loop")
+  log_debug('Entered main loop')
   loop_count = 0
   loop do
-    begin
-      loop_count += 1
-      log_debug("Main loop iteration #{loop_count}") if loop_count % 100 == 1
-      render
-      getkey
-    rescue => e
-      log_debug("Error in main loop: #{e.class}: #{e.message}")
-      @p_bottom.say("Error: #{e.message}") if @p_bottom
-      sleep 1
-    end
+    
+    loop_count += 1
+    log_debug("Main loop iteration #{loop_count}") if loop_count % 100 == 1
+    render
+    chr = getkey
+    handle_key(chr)
+  rescue => e
+    log_debug("Error in main loop: #{e.class}: #{e.message}")
+    @p_bottom.say("Error: #{e.message}") if @p_bottom
+    sleep 1
+    
   end
 rescue Interrupt
-  log_debug("Received interrupt")
+  log_debug('Received interrupt')
   quit
 end
 
 # MAIN {{{1
 begin
-  log_debug("Checking TTY...")
+  log_debug('Checking TTY...')
   # Check if we're in a terminal
   unless $stdin.tty?
-    log_debug("Not in TTY, exiting")
+    log_debug('Not in TTY, exiting')
     puts 'GiTerm requires a TTY terminal to run'
     exit 1
   end
-  log_debug("TTY check passed")
+  log_debug('TTY check passed')
 
-  log_debug("Checking Git repository...")
+  log_debug('Checking Git repository...')
   # Check if we're in a Git repository
   unless system('git rev-parse --git-dir >/dev/null 2>&1')
-    log_debug("Not in Git repo, exiting")
+    log_debug('Not in Git repo, exiting')
     puts 'GiTerm must be run from within a Git repository'
     exit 1
   end
-  log_debug("Git repo check passed")
+  log_debug('Git repo check passed')
 
-  log_debug("Initializing windows...")
+  log_debug('Loading configuration...')
+  load_config
+  log_debug('Config loaded')
+
+  log_debug('Initializing windows...')
   init_windows
-  log_debug("Windows initialized")
+  log_debug('Windows initialized')
   
-  log_debug("Getting git status...")
+  log_debug('Getting git status...')
   git_status  # Start with git status view
-  log_debug("Git status retrieved")
+  log_debug('Git status retrieved')
   
-  @p_bottom.say('Ready - Use j/k to navigate, ? for help')
-  log_debug("Starting main loop...")
+  update_bottom_legends
+  log_debug('Starting main loop...')
   main_loop
 rescue => e
   log_debug("Fatal error: #{e.class}: #{e.message}")
@@ -941,7 +2417,7 @@ rescue => e
   Cursor.show rescue nil
   exit 1
 ensure
-  log_debug("Ensuring cleanup...")
+  log_debug('Ensuring cleanup...')
   Cursor.show rescue nil
 end
 # vim: set sw=2 sts=2 et fdm=marker:

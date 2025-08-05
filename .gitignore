@@ -1,0 +1,53 @@
+# Ruby
+*.gem
+*.rbc
+/.config
+/coverage/
+/InstalledFiles
+/pkg/
+/spec/reports/
+/spec/examples.txt
+/test/tmp/
+/test/version_tmp/
+/tmp/
+
+# Documentation
+/.yardoc/
+/_yardoc/
+/doc/
+/rdoc/
+
+# Environment
+/.bundle/
+/vendor/bundle
+/lib/bundler/man/
+
+# Development
+.byebug_history
+.rspec_status
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.project
+.idea/
+.vscode/
+
+# Local testing
+test_*.rb
+*_test.rb
+test_in_terminal.md
+
+# Documentation drafts
+FIXES.md
+FLICKERING_FIX.md
+FREEZE_FIX.md
+GITHUB_ENHANCEMENTS.md
+NAVIGATION_PERFORMANCE_IMPROVEMENTS.md
+RIGHT_PANE_FIX.md
