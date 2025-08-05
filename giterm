@@ -1,0 +1,947 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# SCRIPT INFO {{{1
+# Name:       GiTerm - Git & GitHub Terminal User Interface
+# Language:   Pure Ruby, following RTFM conventions
+# Author:     Geir Isene <g@isene.com> (adapted from RTFM)
+# Github:     https://github.com/isene/GiTerm
+# License:    Public domain
+@version = '1.0.0'
+
+# SAVE & STORE TERMINAL {{{1
+ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
+
+# Debug logging
+LOG_FILE = '/tmp/giterm_debug.log'
+def log_debug(msg)
+  File.open(LOG_FILE, 'a') do |f|
+    f.puts "#{Time.now.strftime('%H:%M:%S')} - #{msg}"
+  end
+end
+
+# Clear log at start
+File.write(LOG_FILE, "=== GiTerm Debug Log ===\n")
+log_debug("Starting GiTerm...")
+
+at_exit do
+  log_debug("Exiting GiTerm...")
+  system("stty #{ORIG_STTY} 2>/dev/null") rescue nil unless ORIG_STTY.empty?
+end
+
+# ENCODING {{{1
+# encoding: utf-8
+
+# LOAD LIBRARIES {{{1
+begin
+  require 'rcurses'
+  class Object
+    include Rcurses
+    include Rcurses::Input
+  end
+rescue StandardError
+  puts 'GiTerm is built using rcurses. Install rcurses to run GiTerm.'
+  exit 1
+end
+
+require 'fileutils'
+require 'shellwords'
+require 'json'
+require 'net/http'
+require 'uri'
+require 'base64'
+
+# CREATE DIRS & SET FILE CONSTS {{{1
+GITERM_HOME  = File.join(Dir.home, '.giterm')
+CONFIG_FILE  = File.join(GITERM_HOME, 'conf')
+KEYS_FILE    = File.join(GITERM_HOME, 'keys.rb')
+FileUtils.mkdir_p(GITERM_HOME)
+
+# GLOBAL VARIABLES {{{1
+@status_items = []
+@diff_lines = []
+@log_entries = []
+@branches = []
+@remotes = []
+@current_branch = ''
+@index = 0
+@max_index = 0
+@min_index = 0
+@mode = :status  # :status, :diff, :log, :branches, :github_repos, :github_issues, :github_prs
+@github_token = ENV['GITHUB_TOKEN'] || ''
+@github_user = ''
+@github_repos = []
+@github_issues = []
+@github_prs = []
+@selected_repo = ''
+
+# HELP {{{1
+@help = <<~HELPTEXT
+  GiTerm - Git & GitHub Terminal User Interface
+
+  BASIC KEYS
+    ?       = Show this help text
+    q       = Quit GiTerm
+    r       = Refresh current view
+    TAB     = Switch between Git and GitHub mode
+
+  NAVIGATION
+    j/DOWN  = Move down
+    k/UP    = Move up
+    h/LEFT  = Go back/up one level
+    l/RIGHT = Enter/view details
+    g/HOME  = Go to top
+    G/END   = Go to bottom
+    PgDown  = Page down
+    PgUp    = Page up
+
+  GIT MODE
+    s       = Show git status
+    d       = Show git diff
+    D       = Show staged diff
+    a       = Stage file (in status view)
+    u       = Unstage file (in status view)
+    c       = Commit staged changes
+    l       = Show git log
+    b       = Show branches
+    B       = Create new branch
+    m       = Merge branch
+    p       = Pull from remote
+    P       = Push to remote
+
+  GITHUB MODE
+    /       = Search repositories
+    i       = Show issues
+    I       = Create new issue
+    p       = Show pull requests
+    P       = Create new pull request
+    w       = Open in web browser
+
+  INTERACTIVE COMMANDS
+    :       = Enter command mode
+    !       = Run shell command
+HELPTEXT
+
+# INITIALIZATION {{{1
+def init_windows
+  log_debug("Starting init_windows")
+  
+  # Get terminal size directly (like astropanel)
+  log_debug("Getting terminal dimensions...")
+  if IO.console
+    rows, cols = IO.console.winsize
+    log_debug("Terminal size: #{rows}x#{cols}")
+  else
+    log_debug("No IO.console, using fallback")
+    rows, cols = 24, 80
+  end
+  
+  # Clear screen and hide cursor (like astropanel)
+  log_debug("Clearing screen...")
+  Rcurses.clear_screen
+  Cursor.hide
+  
+  # Calculate pane dimensions
+  top_height = 3
+  bottom_height = 1
+  main_height = rows - top_height - bottom_height
+  left_width = cols / 2
+  right_width = cols - left_width
+  
+  # Create panes (x, y, width, height, fg, bg)
+  log_debug("Creating panes with dimensions: #{rows}x#{cols}")
+  @p_top = Pane.new(1, 1, cols, top_height, 255, 0)
+  log_debug("Top pane created")
+  @p_left = Pane.new(1, top_height + 1, left_width, main_height, 255, 0)
+  log_debug("Left pane created")
+  @p_right = Pane.new(left_width + 1, top_height + 1, right_width, main_height, 255, 0)
+  log_debug("Right pane created")
+  @p_bottom = Pane.new(1, rows, cols, bottom_height, 252, 0)
+  log_debug("Bottom pane created")
+  
+  # Set borders
+  log_debug("Setting borders...")
+  @p_top.border = @p_left.border = @p_right.border = @p_bottom.border = 1
+  
+  # Add update attributes (like astropanel)
+  log_debug("Adding update attributes...")
+  [@p_top, @p_left, @p_right, @p_bottom].each do |pane|
+    pane.define_singleton_method(:update) { @update }  
+    pane.define_singleton_method(:update=) { |val| @update = val }
+    pane.update = true
+  end
+  
+  # Initial content
+  log_debug("Updating repo info...")
+  update_repo_info
+  @p_bottom.say('GiTerm initialized - Press ? for help')
+  log_debug("init_windows completed")
+end
+
+def update_repo_info
+  branch = `git rev-parse --abbrev-ref HEAD 2>/dev/null`.strip
+  remote = `git config --get remote.origin.url 2>/dev/null`.strip
+  
+  if branch.empty?
+    @p_top.say('Not a git repository'.fg(196))
+  else
+    @current_branch = branch
+    info = "Branch: #{branch}".fg(154)
+    info += " | Remote: #{remote}".fg(249) unless remote.empty?
+    @p_top.say(info)
+  end
+end
+
+# GIT FUNCTIONS {{{1
+def git_status
+  @mode = :status
+  @status_items = []
+  
+  output = `git status --porcelain 2>/dev/null`.lines
+  output.each do |line|
+    status = line[0..1]
+    file = line[3..].strip
+    @status_items << { status: status, file: file }
+  end
+  
+  @max_index = @status_items.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_status
+end
+
+def display_status
+  content = "Git Status\n".b.fg(156)
+  content += ('=' * 30) + "\n\n"
+  
+  if @status_items.empty?
+    content += 'Working tree clean'.fg(154)
+  else
+    @status_items.each_with_index do |item, i|
+      marker = i == @index ? '> ' : '  '
+      color = case item[:status]
+              when 'M ' then 220  # Modified
+              when ' M' then 214  # Modified, not staged
+              when 'A ' then 154  # Added
+              when 'D ' then 196  # Deleted
+              when '??' then 245  # Untracked
+              else 255
+              end
+      content += marker + item[:status].fg(color) + ' ' + item[:file] + "\n"
+    end
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  # Show diff in right pane if file selected
+  show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+end
+
+def show_file_diff(file)
+  diff = `git diff #{Shellwords.escape(file)} 2>/dev/null`
+  diff = `git diff --cached #{Shellwords.escape(file)} 2>/dev/null` if diff.empty?
+  
+  @p_right.clear
+  if diff.empty?
+    @p_right.say('No changes to display'.fg(245))
+  else
+    content = ''
+    diff.lines.each do |line|
+      content += case line[0]
+                 when '+'
+                   line.fg(154)
+                 when '-'
+                   line.fg(196)
+                 when '@'
+                   line.fg(51)
+                 else
+                   line
+                 end
+    end
+    @p_right.say(content)
+  end
+end
+
+def git_log
+  @mode = :log
+  @log_entries = []
+  
+  log = `git log --oneline -50 2>/dev/null`.lines
+  log.each do |line|
+    @log_entries << { hash: $1, message: $2 } if line =~ /^(\w+)\s+(.*)$/
+  end
+  
+  @max_index = @log_entries.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_log
+end
+
+def display_log
+  content = "Git Log\n".b.fg(156)
+  content += ('=' * 30) + "\n\n"
+  
+  @log_entries.each_with_index do |entry, i|
+    marker = i == @index ? '> ' : '  '
+    content += marker + entry[:hash].fg(220) + ' ' + entry[:message] + "\n"
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  # Show commit details in right pane
+  show_commit_details(@log_entries[@index][:hash]) if @index >= 0 && @index < @log_entries.length
+end
+
+def show_commit_details(hash)
+  details = `git show --stat #{hash} 2>/dev/null`
+  
+  @p_right.clear
+  @p_right.say(details)
+end
+
+def git_branches
+  @mode = :branches
+  @branches = []
+  
+  branches = `git branch -a 2>/dev/null`.lines
+  branches.each do |branch|
+    current = branch.start_with?('*')
+    name = branch.strip.sub(/^\*\s*/, '')
+    @branches << { name: name, current: current }
+  end
+  
+  @max_index = @branches.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_branches
+end
+
+def display_branches
+  content = "Git Branches\n".b.fg(156)
+  content += ('=' * 30) + "\n\n"
+  
+  @branches.each_with_index do |branch, i|
+    marker = i == @index ? '> ' : '  '
+    content += if branch[:current]
+                 marker + '* ' + branch[:name].fg(154) + "\n"
+               else
+                 marker + '  ' + branch[:name] + "\n"
+               end
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+end
+
+def git_pull
+  @p_bottom.say('Pulling from remote...')
+  result = `git pull 2>&1`
+  @p_bottom.say(result.lines.first.strip)
+  git_status  # Refresh status after pull
+end
+
+def git_push
+  @p_bottom.say('Pushing to remote...')
+  result = `git push 2>&1`
+  @p_bottom.say(result.lines.first.strip)
+end
+
+# GITHUB FUNCTIONS {{{1
+def github_request(endpoint)
+  return { error: 'No GitHub token found. Set GITHUB_TOKEN environment variable.' } if @github_token.empty?
+  
+  begin
+    uri = URI.parse("https://api.github.com#{endpoint}")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    
+    request = Net::HTTP::Get.new(uri)
+    request['Authorization'] = "token #{@github_token}"
+    request['Accept'] = 'application/vnd.github.v3+json'
+    
+    response = http.request(request)
+    
+    if response.code == '200'
+      JSON.parse(response.body)
+    else
+      { error: "Request failed: #{response.code}" }
+    end
+  rescue => e
+    { error: e.message }
+  end
+end
+
+def github_repos
+  @mode = :github_repos
+  @github_repos = []
+  
+  result = github_request('/user/repos?per_page=100')
+  
+  if result[:error]
+    @p_left.say(result[:error].fg(196))
+    return
+  end
+  
+  result.each do |repo|
+    @github_repos << {
+      name: repo['name'],
+      full_name: repo['full_name'],
+      description: repo['description'],
+      private: repo['private'],
+      updated_at: repo['updated_at']
+    }
+  end
+  
+  @max_index = @github_repos.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_github_repos
+end
+
+def display_github_repos
+  content = "GitHub Repositories\n".b.fg(156)
+  content += ('=' * 30) + "\n\n"
+  
+  @github_repos.each_with_index do |repo, i|
+    marker = i == @index ? '> ' : '  '
+    privacy = repo[:private] ? '[P]'.fg(196) : '[O]'.fg(154)
+    content += marker + privacy + ' ' + repo[:name].fg(51) + "\n"
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  # Show repo details in right pane
+  show_repo_details(@github_repos[@index]) if @index >= 0 && @index < @github_repos.length
+end
+
+def show_repo_details(repo)
+  content = repo[:full_name].b.fg(156) + "\n"
+  content += ('=' * 40) + "\n\n"
+  content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
+  content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
+  content += 'Updated: '.fg(249) + repo[:updated_at] + "\n"
+  
+  @p_right.clear
+  @p_right.say(content)
+end
+
+def github_issues
+  @mode = :github_issues
+  @github_issues = []
+  @selected_repo = current_repo
+  
+  return if @selected_repo.empty?
+  
+  result = github_request("/repos/#{@selected_repo}/issues?state=open&per_page=50")
+  
+  if result[:error]
+    @p_left.say(result[:error].fg(196))
+    return
+  end
+  
+  result.each do |issue|
+    next if issue['pull_request']  # Skip PRs
+    
+    @github_issues << {
+      number: issue['number'],
+      title: issue['title'],
+      state: issue['state'],
+      user: issue['user']['login'],
+      created_at: issue['created_at'],
+      body: issue['body'],
+      labels: issue['labels']
+    }
+  end
+  
+  @max_index = @github_issues.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_github_issues
+end
+
+def display_github_issues
+  content = "Issues - #{@selected_repo}\n".b.fg(156)
+  content += ('=' * 40) + "\n\n"
+  
+  if @github_issues.empty?
+    content += 'No open issues'.fg(245)
+  else
+    @github_issues.each_with_index do |issue, i|
+      marker = i == @index ? '> ' : '  '
+      number = "##{issue[:number]}".fg(220)
+      content += marker + number + ' ' + issue[:title] + "\n"
+    end
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  # Show issue details in right pane
+  show_issue_details(@github_issues[@index]) if @index >= 0 && @index < @github_issues.length
+end
+
+def show_issue_details(issue)
+  content = "##{issue[:number]} #{issue[:title]}".b.fg(156) + "\n"
+  content += ('=' * 60) + "\n\n"
+  content += 'Author: '.fg(249) + issue[:user] + "\n"
+  content += 'Created: '.fg(249) + issue[:created_at] + "\n"
+  content += 'State: '.fg(249) + issue[:state].fg(issue[:state] == 'open' ? 154 : 196) + "\n\n"
+  
+  unless issue[:labels].empty?
+    content += 'Labels: '.fg(249)
+    issue[:labels].each do |label|
+      content += "[#{label['name']}]".fg(51) + ' '
+    end
+    content += "\n\n"
+  end
+  
+  content += "Description:\n".fg(249)
+  content += ('-' * 20) + "\n"
+  content += issue[:body] || 'No description'
+  
+  @p_right.clear
+  @p_right.say(content)
+end
+
+def github_pull_requests
+  @mode = :github_prs
+  @github_prs = []
+  @selected_repo = current_repo
+  
+  return if @selected_repo.empty?
+  
+  result = github_request("/repos/#{@selected_repo}/pulls?state=open&per_page=50")
+  
+  if result[:error]
+    @p_left.say(result[:error].fg(196))
+    return
+  end
+  
+  result.each do |pr|
+    @github_prs << {
+      number: pr['number'],
+      title: pr['title'],
+      state: pr['state'],
+      user: pr['user']['login'],
+      created_at: pr['created_at'],
+      body: pr['body'],
+      head: pr['head']['ref'],
+      base: pr['base']['ref']
+    }
+  end
+  
+  @max_index = @github_prs.length - 1
+  @min_index = 0
+  @index = 0 if @index > @max_index
+  
+  display_github_prs
+end
+
+def display_github_prs
+  content = "Pull Requests - #{@selected_repo}\n".b.fg(156)
+  content += ('=' * 40) + "\n\n"
+  
+  if @github_prs.empty?
+    content += 'No open pull requests'.fg(245)
+  else
+    @github_prs.each_with_index do |pr, i|
+      marker = i == @index ? '> ' : '  '
+      number = "##{pr[:number]}".fg(220)
+      content += marker + number + ' ' + pr[:title] + "\n"
+    end
+  end
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  # Show PR details in right pane
+  show_pr_details(@github_prs[@index]) if @index >= 0 && @index < @github_prs.length
+end
+
+def show_pr_details(pull_request)
+  content = "##{pull_request[:number]} #{pull_request[:title]}".b.fg(156) + "\n"
+  content += ('=' * 60) + "\n\n"
+  content += 'Author: '.fg(249) + pull_request[:user] + "\n"
+  content += 'Created: '.fg(249) + pull_request[:created_at] + "\n"
+  content += 'State: '.fg(249) + pull_request[:state].fg(pull_request[:state] == 'open' ? 154 : 196) + "\n"
+  content += 'Branch: '.fg(249) + "#{pull_request[:head]} → #{pull_request[:base]}" + "\n\n"
+  
+  content += "Description:\n".fg(249)
+  content += ('-' * 20) + "\n"
+  content += pull_request[:body] || 'No description'
+  
+  @p_right.clear
+  @p_right.say(content)
+end
+
+def current_repo
+  remote_url = `git config --get remote.origin.url 2>/dev/null`.strip
+  return '' if remote_url.empty?
+  
+  # Extract owner/repo from various URL formats
+  if remote_url =~ %r{github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$}
+    "#{$1}/#{$2}"
+  else
+    ''
+  end
+end
+
+# KEY BINDINGS {{{1
+def getkey
+  chr = getchr(1)
+  return unless chr
+  
+  case chr
+  when '?'
+    show_help
+  when 'q'
+    quit
+  when 'r'
+    refresh_view
+  when 'j', 'DOWN'
+    move_down
+  when 'k', 'UP'
+    move_up
+  when 'g', 'HOME'
+    @index = @min_index
+    refresh_view
+  when 'G', 'END'
+    @index = @max_index
+    refresh_view
+  when 's'
+    git_status
+  when 'd'
+    case @mode
+    when :status
+      git_diff
+    else
+      git_status
+    end
+  when 'l'
+    git_log
+  when 'b'
+    git_branches
+  when 'TAB'
+    github_repos
+  when 'i'
+    if @mode.to_s.start_with?('github')
+      github_issues
+    else
+      git_status  # fallback
+    end
+  when 'p'
+    case @mode
+    when :status, :log, :branches
+      git_pull
+    else
+      github_pull_requests
+    end
+  when 'P'
+    git_push
+  when 'a'
+    stage_file if @mode == :status
+  when 'u'
+    unstage_file if @mode == :status
+  when 'c'
+    commit_changes
+  when ':'
+    command_mode
+  when '!'
+    shell_command
+  end
+end
+
+def move_down
+  @index = @index >= @max_index ? @min_index : @index + 1
+  refresh_view
+end
+
+def move_up
+  @index = @index <= @min_index ? @max_index : @index - 1
+  refresh_view
+end
+
+def refresh_view
+  case @mode
+  when :status
+    display_status
+  when :log
+    display_log
+  when :branches
+    display_branches
+  when :github_repos
+    display_github_repos
+  when :github_issues
+    display_github_issues
+  when :github_prs
+    display_github_prs
+  end
+  
+  @p_top.update = @p_left.update = @p_right.update = @p_bottom.update = true
+end
+
+def show_help
+  @p_right.clear
+  @p_right.say(@help)
+end
+
+def stage_file
+  return unless @mode == :status && @index < @status_items.length
+  
+  file = @status_items[@index][:file]
+  `git add #{Shellwords.escape(file)}`
+  git_status
+end
+
+def unstage_file
+  return unless @mode == :status && @index < @status_items.length
+  
+  file = @status_items[@index][:file]
+  `git reset HEAD #{Shellwords.escape(file)}`
+  git_status
+end
+
+def commit_changes
+  @p_bottom.clear
+  @p_bottom.say('Commit message: ')
+  
+  # Simple input handling
+  message = ''
+  loop do
+    chr = getchr
+    case chr
+    when 'ENTER'
+      break
+    when 'ESCAPE'
+      @p_bottom.say('Commit cancelled')
+      return
+    when 'BACKSPACE'
+      message.chop!
+      @p_bottom.clear
+      @p_bottom.say("Commit message: #{message}")
+    else
+      if chr && chr.length == 1
+        message += chr
+        @p_bottom.say("Commit message: #{message}")
+      end
+    end
+  end
+  
+  if message.strip.empty?
+    @p_bottom.say('Commit cancelled - empty message')
+  else
+    result = `git commit -m #{Shellwords.escape(message)} 2>&1`
+    @p_bottom.say(result.lines.first.strip)
+    git_status
+  end
+end
+
+def command_mode
+  @p_bottom.clear
+  @p_bottom.say(':')
+  
+  command = ''
+  loop do
+    chr = getchr
+    case chr
+    when 'ENTER'
+      break
+    when 'ESCAPE'
+      @p_bottom.clear
+      return
+    when 'BACKSPACE'
+      command.chop!
+      @p_bottom.clear
+      @p_bottom.say(":#{command}")
+    else
+      if chr && chr.length == 1
+        command += chr
+        @p_bottom.say(":#{command}")
+      end
+    end
+  end
+  
+  # Execute git command
+  if command.strip.empty?
+    @p_bottom.clear
+  else
+    result = `git #{command} 2>&1`
+    @p_right.clear
+    @p_right.say(result)
+  end
+end
+
+def shell_command
+  @p_bottom.clear
+  @p_bottom.say('!')
+  
+  command = ''
+  loop do
+    chr = getchr
+    case chr
+    when 'ENTER'
+      break
+    when 'ESCAPE'
+      @p_bottom.clear
+      return
+    when 'BACKSPACE'
+      command.chop!
+      @p_bottom.clear
+      @p_bottom.say("!#{command}")
+    else
+      if chr && chr.length == 1
+        command += chr
+        @p_bottom.say("!#{command}")
+      end
+    end
+  end
+  
+  # Execute shell command
+  if command.strip.empty?
+    @p_bottom.clear
+  else
+    result = `#{command} 2>&1`
+    @p_right.clear
+    @p_right.say(result)
+  end
+end
+
+def git_diff
+  case @mode
+  when :status
+    if @index < @status_items.length
+      file = @status_items[@index][:file]
+      diff = `git diff #{Shellwords.escape(file)} 2>/dev/null`
+      
+      @p_right.clear
+      if diff.empty?
+        @p_right.say('No unstaged changes'.fg(245))
+      else
+        formatted_diff = ''
+        diff.lines.each do |line|
+          formatted_diff += case line[0]
+                            when '+'
+                              line.fg(154)
+                            when '-'
+                              line.fg(196)
+                            when '@'
+                              line.fg(51)
+                            else
+                              line
+                            end
+        end
+        @p_right.say(formatted_diff)
+      end
+    end
+  else
+    # Show full diff
+    diff = `git diff 2>/dev/null`
+    
+    @p_right.clear
+    if diff.empty?
+      @p_right.say('No changes'.fg(245))
+    else
+      formatted_diff = ''
+      diff.lines.each do |line|
+        formatted_diff += case line[0]
+                          when '+'
+                            line.fg(154)
+                          when '-'
+                            line.fg(196)
+                          when '@'
+                            line.fg(51)
+                          else
+                            line
+                          end
+      end
+      @p_right.say(formatted_diff)
+    end
+  end
+end
+
+def quit
+  log_debug("Quitting...")
+  Cursor.show
+  Rcurses.clear_screen
+  exit 0
+end
+
+# MAIN LOOP {{{1
+def render
+  # Force refresh all panes for now
+  @p_top.refresh
+  @p_left.refresh
+  @p_right.refresh
+  @p_bottom.refresh
+end
+
+def main_loop
+  log_debug("Entered main loop")
+  loop_count = 0
+  loop do
+    begin
+      loop_count += 1
+      log_debug("Main loop iteration #{loop_count}") if loop_count % 100 == 1
+      render
+      getkey
+    rescue => e
+      log_debug("Error in main loop: #{e.class}: #{e.message}")
+      @p_bottom.say("Error: #{e.message}") if @p_bottom
+      sleep 1
+    end
+  end
+rescue Interrupt
+  log_debug("Received interrupt")
+  quit
+end
+
+# MAIN {{{1
+begin
+  log_debug("Checking TTY...")
+  # Check if we're in a terminal
+  unless $stdin.tty?
+    log_debug("Not in TTY, exiting")
+    puts 'GiTerm requires a TTY terminal to run'
+    exit 1
+  end
+  log_debug("TTY check passed")
+
+  log_debug("Checking Git repository...")
+  # Check if we're in a Git repository
+  unless system('git rev-parse --git-dir >/dev/null 2>&1')
+    log_debug("Not in Git repo, exiting")
+    puts 'GiTerm must be run from within a Git repository'
+    exit 1
+  end
+  log_debug("Git repo check passed")
+
+  log_debug("Initializing windows...")
+  init_windows
+  log_debug("Windows initialized")
+  
+  log_debug("Getting git status...")
+  git_status  # Start with git status view
+  log_debug("Git status retrieved")
+  
+  @p_bottom.say('Ready - Use j/k to navigate, ? for help')
+  log_debug("Starting main loop...")
+  main_loop
+rescue => e
+  log_debug("Fatal error: #{e.class}: #{e.message}")
+  log_debug("Backtrace: #{e.backtrace.first(3).join(' | ')}")
+  puts "Fatal error: #{e.message} (see #{LOG_FILE})"
+  Cursor.show rescue nil
+  exit 1
+ensure
+  log_debug("Ensuring cleanup...")
+  Cursor.show rescue nil
+end
+# vim: set sw=2 sts=2 et fdm=marker:
