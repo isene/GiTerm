@@ -7,7 +7,7 @@
 # Author:     Geir Isene <g@isene.com> (adapted from RTFM)
 # Github:     https://github.com/isene/GiTerm
 # License:    Public domain
-@version = '1.0.0'
+@version = '1.1.0'
 
 # SAVE & STORE TERMINAL {{{1
 ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
@@ -421,6 +421,11 @@ def update_bottom_legends
 end
 
 def update_repo_info
+  unless @is_git_repo
+    @p_top.say('[No Git Repo]'.fg(196) + ' | ' + 'GitHub Mode Available'.fg(154))
+    return
+  end
+  
   branch = `git rev-parse --abbrev-ref HEAD 2>/dev/null`.strip
   remote = `git config --get remote.origin.url 2>/dev/null`.strip
   
@@ -436,7 +441,7 @@ end
 
 def update_mode_info(mode_title)
   @current_mode_title = mode_title
-  if @current_branch
+  if @current_branch && @current_repo
     info = "[#{mode_title}]".fg(156) + " | " + @current_repo.fg(249) + " | " + @current_branch.fg(154)
   else
     info = "[#{mode_title}]".fg(156)
@@ -447,6 +452,23 @@ end
 # GIT FUNCTIONS {{{1
 def git_status
   @mode = :status
+  
+  unless @is_git_repo
+    @status_items = []
+    @p_left.clear
+    @p_left.say('Not in a Git repository'.fg(196) + "\n\n" +
+                'Press TAB to switch to GitHub mode'.fg(245))
+    @p_right.clear
+    @p_right.say('To use local Git features:'.fg(156) + "\n\n" +
+                 '1. Navigate to a Git repository'.fg(245) + "\n" +
+                 '2. Run giterm from within the repository'.fg(245) + "\n\n" +
+                 'Or press TAB to use GitHub features'.fg(154))
+    @max_index = 0
+    @min_index = 0
+    @index = 0
+    return
+  end
+  
   @status_items = []
   @p_left.ix = 0  # Reset scroll position
   
@@ -468,6 +490,7 @@ def git_status
   @index = [@index, @min_index].max
   
   display_status
+  update_right_pane  # Show repo overview when working tree is clean
 end
 
 def display_status
@@ -519,11 +542,101 @@ def display_status
   @p_left.say(content)
   @p_left.ix = saved_ix
   
-  # Show diff in right pane if file selected
-  show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+  # Show diff in right pane if file selected, or repo overview if clean
+  if @status_items.empty?
+    show_repo_overview
+  else
+    show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+  end
+end
+
+def show_repo_overview
+  unless @is_git_repo
+    return
+  end
+  
+  content = "Repository Overview\n".b.fg(156)
+  content += ('=' * 30) + "\n\n"
+  
+  # Get repository information
+  branch = `git rev-parse --abbrev-ref HEAD 2>/dev/null`.strip
+  remote = `git config --get remote.origin.url 2>/dev/null`.strip
+  commit_count = `git rev-list --count HEAD 2>/dev/null`.strip
+  last_commit = `git log -1 --pretty=format:'%h %s (%cr by %an)' 2>/dev/null`.strip
+  contributors = `git shortlog -sn 2>/dev/null | head -5`.strip
+  branches_count = `git branch -r 2>/dev/null | wc -l`.strip
+  tags_count = `git tag 2>/dev/null | wc -l`.strip
+  stash_count = `git stash list 2>/dev/null | wc -l`.strip
+  
+  # Repository name and remote
+  if !remote.empty?
+    repo_name = File.basename(remote, '.git')
+    content += "Repository: ".fg(249) + repo_name.fg(220) + "\n"
+    content += "Remote: ".fg(249) + remote.fg(245) + "\n"
+  else
+    content += "Repository: ".fg(249) + "Local only (no remote)".fg(245) + "\n"
+  end
+  
+  content += "\n"
+  
+  # Current branch
+  content += "Current branch: ".fg(249) + branch.fg(154) + "\n"
+  
+  # Statistics
+  content += "Total commits: ".fg(249) + commit_count.fg(51) + "\n"
+  content += "Branches: ".fg(249) + branches_count.fg(51) + "\n"
+  content += "Tags: ".fg(249) + tags_count.fg(51) + "\n"
+  
+  if stash_count.to_i > 0
+    content += "Stashed changes: ".fg(249) + stash_count.fg(220) + "\n"
+  end
+  
+  content += "\n"
+  
+  # Last commit
+  if !last_commit.empty?
+    content += "Last commit:\n".fg(156)
+    content += last_commit.fg(245) + "\n\n"
+  end
+  
+  # Top contributors
+  if !contributors.empty?
+    content += "Top contributors:\n".fg(156)
+    contributors.lines.each do |line|
+      count, name = line.strip.split("\t", 2)
+      content += "  #{count.rjust(4).fg(51)} #{name.fg(249)}\n" if name
+    end
+    content += "\n"
+  end
+  
+  # Check for uncommitted changes
+  status = `git status --porcelain 2>/dev/null`
+  if status.empty?
+    content += "✓ Working tree clean".fg(154) + "\n"
+  else
+    modified = status.lines.count { |l| l[0..1].include?('M') }
+    added = status.lines.count { |l| l[0..1].include?('A') }
+    deleted = status.lines.count { |l| l[0..1].include?('D') }
+    untracked = status.lines.count { |l| l[0..1] == '??' }
+    
+    content += "Uncommitted changes:\n".fg(220)
+    content += "  Modified: #{modified}\n".fg(214) if modified > 0
+    content += "  Added: #{added}\n".fg(154) if added > 0
+    content += "  Deleted: #{deleted}\n".fg(196) if deleted > 0
+    content += "  Untracked: #{untracked}\n".fg(245) if untracked > 0
+  end
+  
+  @p_right.clear
+  @p_right.say(content)
 end
 
 def show_file_diff(file)
+  unless @is_git_repo
+    @p_right.clear
+    @p_right.say('Not in a Git repository'.fg(196))
+    return
+  end
+  
   diff = `git diff #{Shellwords.escape(file)} 2>/dev/null`
   diff = `git diff --cached #{Shellwords.escape(file)} 2>/dev/null` if diff.empty?
   
@@ -549,6 +662,14 @@ def show_file_diff(file)
 end
 
 def git_log
+  unless @is_git_repo
+    @p_left.clear
+    @p_left.say('Not in a Git repository'.fg(196))
+    @p_right.clear
+    @p_right.say('Git log unavailable outside repositories'.fg(245))
+    return
+  end
+  
   @mode = :log
   @log_entries = []
   @p_left.ix = 0  # Reset scroll position
@@ -594,6 +715,14 @@ def show_commit_details(hash)
 end
 
 def git_branches
+  unless @is_git_repo
+    @p_left.clear
+    @p_left.say('Not in a Git repository'.fg(196))
+    @p_right.clear
+    @p_right.say('Git branches unavailable outside repositories'.fg(245))
+    return
+  end
+  
   @mode = :branches
   @branches = []
   @p_left.ix = 0  # Reset scroll position
@@ -635,6 +764,11 @@ def display_branches
 end
 
 def git_pull
+  unless @is_git_repo
+    @p_bottom.say('Not in a Git repository'.fg(196))
+    return
+  end
+  
   @p_bottom.say('Pulling from remote...')
   result = `git pull 2>&1`
   @p_bottom.say(result.lines.first.strip)
@@ -642,6 +776,11 @@ def git_pull
 end
 
 def git_push
+  unless @is_git_repo
+    @p_bottom.say('Not in a Git repository'.fg(196))
+    return
+  end
+  
   @p_bottom.say('Pushing to remote...')
   result = `git push 2>&1`
   @p_bottom.say(result.lines.first.strip)
@@ -770,6 +909,66 @@ def github_request_curl(endpoint)
   rescue => e
     { error: "curl error: #{e.message}" }
   end
+end
+
+def show_github_setup_in_nongit
+  @mode = :status  # Use status mode but show special message
+  @status_items = []  # Empty items list
+  
+  content = "GiTerm - GitHub Terminal UI\n".b.fg(156)
+  content += ('=' * 35) + "\n\n"
+  
+  content += "Not in a Git repository\n".fg(196)
+  content += "Local Git features unavailable\n\n".fg(245)
+  
+  if @github_token.empty?
+    content += "[!] No GitHub token found\n\n".fg(196)
+    content += "To access GitHub features:\n".fg(249)
+    content += "Press ".fg(249) + "'T'".fg(51) + " for guided token setup\n\n".fg(249)
+    content += "Or set GITHUB_TOKEN environment variable\n".fg(245)
+  else
+    content += "GitHub token configured!\n".fg(154)
+    content += "Press TAB to view GitHub repositories\n".fg(249)
+  end
+  
+  content += "\n\nKeyboard shortcuts:\n".fg(156)
+  content += "TAB".fg(220) + " - Switch to GitHub mode\n".fg(245)
+  content += "T".fg(220) + "   - Set up GitHub token\n".fg(245)
+  content += "q".fg(220) + "   - Quit GiTerm\n".fg(245)
+  content += "?".fg(220) + "   - Show help\n".fg(245)
+  
+  @p_left.clear
+  @p_left.say(content)
+  
+  @p_right.clear
+  if @github_token.empty?
+    help_text = "GitHub Setup Guide\n".b.fg(156)
+    help_text += ('=' * 25) + "\n\n"
+    help_text += "1. Press 'T' to start token setup\n".fg(249)
+    help_text += "2. Follow the instructions\n".fg(249)
+    help_text += "3. Create a Personal Access Token\n".fg(249)
+    help_text += "   with 'repo' permissions\n".fg(249)
+    help_text += "4. Paste the token when prompted\n\n".fg(249)
+    help_text += "Benefits of GitHub integration:\n".fg(154)
+    help_text += "• Browse all your repositories\n".fg(245)
+    help_text += "• View issues and pull requests\n".fg(245)
+    help_text += "• Search GitHub repositories\n".fg(245)
+    help_text += "• Access private repos\n".fg(245)
+    @p_right.say(help_text)
+  else
+    @p_right.say('Press TAB to switch to GitHub mode'.fg(154))
+  end
+  
+  # Set up proper indices for main loop
+  @max_index = 0
+  @min_index = 0
+  @index = 0
+  
+  # Update mode info
+  update_mode_info('Not in Git Repository')
+  
+  # Show bottom legends
+  update_bottom_legends
 end
 
 def github_repos
@@ -2049,7 +2248,13 @@ def update_right_pane(fast_update = false)
   
   case @mode
   when :status
-    show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+    if @is_git_repo
+      if @status_items.empty?
+        show_repo_overview
+      else
+        show_file_diff(@status_items[@index][:file]) if @index >= 0 && @index < @status_items.length
+      end
+    end
   when :log
     show_commit_details(@log_entries[@index]) if @index >= 0 && @index < @log_entries.length
   when :branches
@@ -2125,7 +2330,7 @@ def show_help
 end
 
 def stage_file
-  return unless @mode == :status && @index < @status_items.length
+  return unless @is_git_repo && @mode == :status && @index < @status_items.length
   
   file = @status_items[@index][:file]
   `git add #{Shellwords.escape(file)}`
@@ -2133,7 +2338,7 @@ def stage_file
 end
 
 def unstage_file
-  return unless @mode == :status && @index < @status_items.length
+  return unless @is_git_repo && @mode == :status && @index < @status_items.length
   
   file = @status_items[@index][:file]
   `git reset HEAD #{Shellwords.escape(file)}`
@@ -2141,6 +2346,11 @@ def unstage_file
 end
 
 def commit_changes
+  unless @is_git_repo
+    @p_bottom.say('Not in a Git repository'.fg(196))
+    return
+  end
+  
   @p_bottom.clear
   @p_bottom.say('Commit message: ')
   
@@ -2358,17 +2568,19 @@ def main_loop
   log_debug('Entered main loop')
   loop_count = 0
   loop do
-    
-    loop_count += 1
-    log_debug("Main loop iteration #{loop_count}") if loop_count % 100 == 1
-    render
-    chr = getkey
-    handle_key(chr)
-  rescue => e
-    log_debug("Error in main loop: #{e.class}: #{e.message}")
-    @p_bottom.say("Error: #{e.message}") if @p_bottom
-    sleep 1
-    
+    begin
+      loop_count += 1
+      log_debug("Main loop iteration #{loop_count}") if loop_count % 100 == 1
+      render
+      chr = getkey
+      handle_key(chr)
+    rescue => e
+      log_debug("Error in main loop: #{e.class}: #{e.message}")
+      log_debug("Backtrace: #{e.backtrace.first(5).join(' | ')}")
+      @p_bottom.say("Error: #{e.message}") if @p_bottom
+      sleep 1
+      # Continue the loop after error
+    end
   end
 rescue Interrupt
   log_debug('Received interrupt')
@@ -2388,12 +2600,12 @@ begin
 
   log_debug('Checking Git repository...')
   # Check if we're in a Git repository
-  unless system('git rev-parse --git-dir >/dev/null 2>&1')
-    log_debug('Not in Git repo, exiting')
-    puts 'GiTerm must be run from within a Git repository'
-    exit 1
+  @is_git_repo = system('git rev-parse --git-dir >/dev/null 2>&1')
+  if @is_git_repo
+    log_debug('Git repo check passed')
+  else
+    log_debug('Not in Git repo, but continuing...')
   end
-  log_debug('Git repo check passed')
 
   log_debug('Loading configuration...')
   load_config
@@ -2403,9 +2615,15 @@ begin
   init_windows
   log_debug('Windows initialized')
   
-  log_debug('Getting git status...')
-  git_status  # Start with git status view
-  log_debug('Git status retrieved')
+  if @is_git_repo
+    log_debug('Getting git status...')
+    git_status  # Start with git status view
+    log_debug('Git status retrieved')
+  else
+    # Start in non-git mode
+    log_debug('Not in git repo, showing non-git UI...')
+    show_github_setup_in_nongit
+  end
   
   update_bottom_legends
   log_debug('Starting main loop...')

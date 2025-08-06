@@ -2,6 +2,33 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [1.1.0] - 2025-08-06
+
+### 🏠 Non-Git Directory Support
+- GiTerm now runs successfully outside of git repositories
+- Shows helpful GitHub integration setup when not in a git repo
+- Seamless TAB switching between local Git and GitHub modes
+- All git operations show appropriate messages when not in repo
+
+### 📊 Enhanced Local Repository Display
+- Repository overview displayed when working tree is clean
+- Shows repository name, remote URL, current branch
+- Statistics: total commits, branches, tags, stashes
+- Last commit details (hash, message, time, author)
+- Top 5 contributors with commit counts
+- Working tree status summary
+
+### 🔧 Bug Fixes
+- Fixed crash when starting in non-git directory (NoMethodError)
+- Fixed main loop error handling to continue after exceptions
+- Fixed update_mode_info to handle nil branch/repo values
+- Improved error handling throughout the application
+
+### 📸 Documentation
+- Added comprehensive screenshots showing all major features
+- Updated README with new feature descriptions
+- Enhanced help system with keyboard shortcuts
+
 ## [1.0.0] - 2025-01-05
 
 ### Added

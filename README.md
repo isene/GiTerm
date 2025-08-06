@@ -51,6 +51,28 @@ A powerful Git and GitHub Terminal User Interface (TUI) client written in Ruby u
 - `:` - Enter git command mode
 - `!` - Enter shell command mode
 
+## Screenshots
+
+### Git Repository Status View
+Shows the enhanced status view with file changes and detailed diff information in the right pane:
+
+![Git Status View](screenshots/giterm_git_status.png)
+
+### Non-Git Directory Support
+New in v1.1.0 - GiTerm now runs in non-git directories and offers GitHub integration:
+
+![Non-Git Directory](screenshots/giterm_non_git.png)
+
+### GitHub Repositories Mode
+Browse all your GitHub repositories with detailed information and README preview:
+
+![GitHub Mode](screenshots/giterm_github_mode.png)
+
+### Help System
+Comprehensive help showing all available keyboard shortcuts:
+
+![Help Screen](screenshots/giterm_help.png)
+
 ## Requirements
 
 - Ruby 2.7 or higher
@@ -135,6 +157,13 @@ GiTerm looks for configuration in the following order:
 - Execute any shell command from within GiTerm
 
 ## What's New
+
+### Version 1.1.0
+- 🏠 **Non-Git Directory Support** - GiTerm now runs outside git repositories!
+- 📊 **Enhanced Local Repository Info** - Rich repository overview when working tree is clean
+- 🔧 **Smart Mode Switching** - Seamless switching between local Git and GitHub modes
+- 🎯 **Improved User Experience** - Better error handling and helpful guidance
+- 📸 **Updated Documentation** - New screenshots showing all major features
 
 ### Version 1.0.0
 - 🎨 Organization color coding in GitHub mode
