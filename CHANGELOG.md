@@ -2,6 +2,12 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [1.1.1] - 2025-08-07
+
+### 🐛 Bug Fixes
+- Fixed search selection arrow visibility issue when starting new search after scrolling
+- Search function now properly resets both selection index and scroll position to show first result
+
 ## [1.1.0] - 2025-08-06
 
 ### 🏠 Non-Git Directory Support

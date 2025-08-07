@@ -1474,6 +1474,7 @@ def github_search_repositories
   @mode = :github_search
   @github_search_results = []
   @index = 0
+  @p_left.ix = 0  # Reset scroll position
   
   # Perform the search
   result = github_request("/search/repositories?q=#{CGI.escape(query)}&sort=stars&order=desc&per_page=50")

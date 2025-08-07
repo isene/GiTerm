@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "giterm"
-  spec.version       = "1.1.0"
+  spec.version       = "1.1.1"
   spec.authors       = ["Geir Isene"]
   spec.email         = ["g@isene.com"]
 
