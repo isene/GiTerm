@@ -7,7 +7,7 @@
 # Author:     Geir Isene <g@isene.com> (adapted from RTFM)
 # Github:     https://github.com/isene/GiTerm
 # License:    Public domain
-@version = '1.1.0'
+@version = '2.0.0'
 
 # SAVE & STORE TERMINAL {{{1
 ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
@@ -2611,6 +2611,11 @@ begin
   log_debug('Loading configuration...')
   load_config
   log_debug('Config loaded')
+
+  # Initialize rcurses (required for rcurses 6.0.0+)
+  log_debug('Initializing rcurses...')
+  Rcurses.init!
+  log_debug('Rcurses initialized')
 
   log_debug('Initializing windows...')
   init_windows
