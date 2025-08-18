@@ -1,5 +1,9 @@
 # GiTerm - Git & GitHub Terminal User Interface
 
+[![License](https://img.shields.io/badge/License-Public%20Domain-brightgreen.svg)](https://unlicense.org/)
+[![GitHub stars](https://img.shields.io/github/stars/isene/GiTerm.svg)](https://github.com/isene/GiTerm/stargazers)
+[![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-blue.svg)](https://isene.org)
+
 ![Ruby](https://img.shields.io/badge/language-Ruby-red) [![Gem Version](https://badge.fury.io/rb/giterm.svg)](https://badge.fury.io/rb/giterm) ![License](https://img.shields.io/badge/license-Public_Domain-green)
 
 A powerful Git and GitHub Terminal User Interface (TUI) client written in Ruby using rcurses. Browse repositories, manage issues and pull requests, and perform Git operations - all from your terminal.
