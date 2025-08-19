@@ -2,6 +2,16 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [2.0.2] - 2025-08-19
+
+### 🐛 Bug Fixes
+- Fixed branch selection issue where cursor would move but selection remained on top branch (Fixes #2)
+- Fixed commit diff display being cut off at file statistics line - now shows full diff (Fixes #2)
+
+### ✨ Improvements
+- Implemented proper selection tracking for branches mode with optimized updates
+- Added branch details view showing recent commits, tracking info, and ahead/behind status
+
 ## [2.0.1] - 2025-08-19
 
 ### 🐛 Bug Fixes

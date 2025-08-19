@@ -708,10 +708,65 @@ def display_log
 end
 
 def show_commit_details(hash)
-  details = `git show --stat #{hash} 2>/dev/null`
+  # Show full commit with diff, not just stats
+  details = `git show #{hash} 2>/dev/null`
   
   @p_right.clear
   @p_right.say(details)
+end
+
+def show_branch_details(branch)
+  return unless branch
+  
+  @p_right.clear
+  
+  branch_name = branch[:name]
+  
+  # Show branch information
+  info = "Branch: #{branch_name}\n\n"
+  
+  if branch[:current]
+    info += "Status: Currently checked out\n\n"
+  else
+    info += "Status: Not checked out\n\n"
+  end
+  
+  # Show last 10 commits on this branch
+  info += "Recent commits:\n" + '─' * 40 + "\n\n"
+  
+  # Get commit log for this branch
+  if branch_name.start_with?('remotes/')
+    # For remote branches, use the full name
+    log_output = `git log --oneline -10 #{branch_name} 2>/dev/null`
+  else
+    # For local branches
+    log_output = `git log --oneline -10 #{branch_name} 2>/dev/null`
+  end
+  
+  if log_output.empty?
+    info += "No commits found on this branch\n"
+  else
+    info += log_output
+  end
+  
+  # Show branch tracking info if available
+  if !branch_name.start_with?('remotes/')
+    tracking = `git rev-parse --abbrev-ref #{branch_name}@{upstream} 2>/dev/null`.strip
+    unless tracking.empty?
+      info += "\n" + '─' * 40 + "\n"
+      info += "Tracking: #{tracking}\n"
+      
+      # Show ahead/behind status
+      ahead_behind = `git rev-list --left-right --count #{branch_name}...#{tracking} 2>/dev/null`.strip
+      unless ahead_behind.empty?
+        ahead, behind = ahead_behind.split("\t")
+        info += "Ahead: #{ahead} commits\n" if ahead.to_i > 0
+        info += "Behind: #{behind} commits\n" if behind.to_i > 0
+      end
+    end
+  end
+  
+  @p_right.say(info)
 end
 
 def git_branches
@@ -2127,8 +2182,33 @@ def update_log_selection(old_index, new_index)
 end
 
 def update_branches_selection(old_index, new_index)
-  # Implement if needed for branches mode
-  refresh_view
+  return if @branches.empty?
+  
+  lines_to_update = []
+  
+  # Update old selection (remove marker)
+  if old_index >= 0 && old_index < @branches.length
+    branch = @branches[old_index]
+    if branch[:current]
+      old_line = '  * ' + branch[:name].fg(154)
+    else
+      old_line = '    ' + branch[:name]
+    end
+    lines_to_update << { index: old_index, content: old_line }
+  end
+  
+  # Update new selection (add marker)
+  if new_index >= 0 && new_index < @branches.length
+    branch = @branches[new_index]
+    if branch[:current]
+      new_line = '→ * ' + branch[:name].fg(154)
+    else
+      new_line = '→   ' + branch[:name]
+    end
+    lines_to_update << { index: new_index, content: new_line }
+  end
+  
+  update_pane_lines(lines_to_update)
 end
 
 def update_github_search_selection(old_index, new_index)
@@ -2259,7 +2339,7 @@ def update_right_pane(fast_update = false)
   when :log
     show_commit_details(@log_entries[@index][:hash]) if @index >= 0 && @index < @log_entries.length
   when :branches
-    # Handle branch details if needed
+    show_branch_details(@branches[@index]) if @index >= 0 && @index < @branches.length
   when :github_repos
     log_debug("GitHub repos mode: showing repo #{@index}/#{@github_repos.length}")
     show_repo_details(@github_repos[@index], !fast_update) if @index >= 0 && @index < @github_repos.length
