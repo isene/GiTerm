@@ -2,6 +2,26 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [2.0.1] - 2025-08-19
+
+### 🐛 Bug Fixes
+- Fixed macOS log history display issue where entries would briefly appear then vanish (Fixes #1)
+- Corrected data type mismatch in `update_right_pane` when displaying log commit details
+
+### ⌨️ Improved Accessibility
+- Added 'f' and 'F' as alternative keybindings for PageDown/PageUp for keyboards without dedicated keys
+- Updated help text and legends to reflect new keybindings
+- Addresses accessibility concerns for Apple keyboard users
+
+### 🧹 Cleanup
+- Removed unnecessary temporary documentation files
+- Cleaned up empty test directories
+
+## [2.0.0] - 2025-08-18
+
+### 💥 Breaking Changes
+- Requires rcurses 6.0.0+ with explicit initialization for Ruby 3.4+ compatibility
+
 ## [1.1.1] - 2025-08-07
 
 ### 🐛 Bug Fixes

@@ -7,7 +7,7 @@
 # Author:     Geir Isene <g@isene.com> (adapted from RTFM)
 # Github:     https://github.com/isene/GiTerm
 # License:    Public domain
-@version = '2.0.0'
+@version = '2.0.1'
 
 # SAVE & STORE TERMINAL {{{1
 ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
@@ -236,9 +236,9 @@ def handle_popup_scrolling(popup)
       popup.linedown
     when 'k', 'UP'
       popup.lineup
-    when 'PgDOWN'
+    when 'PgDOWN', 'f'  # 'f' as alternative for keyboards without PgDn
       popup.pagedown
-    when 'PgUP'
+    when 'PgUP', 'F'  # 'F' as alternative for keyboards without PgUp
       popup.pageup
     when 'ENTER', ' ', 'q', 'ESCAPE'
       break
@@ -310,8 +310,8 @@ end
     l/RIGHT = Enter/view details
     g/HOME  = Go to top
     G/END   = Go to bottom
-    PgDown  = Page down in right pane
-    PgUp    = Page up in right pane
+    f/PgDn  = Page down in left pane
+    F/PgUp  = Page up in left pane
     S-RIGHT = Page down in right pane
     S-LEFT  = Page up in right pane
 
@@ -416,7 +416,7 @@ end
 
 def update_bottom_legends
   # Show key legends in bottom pane
-  legends = 'j/k:Nav  PgUp/PgDn:Page  g/G:Top/End  J/K:Scroll  d:Diff  l:Log  b:Branches  TAB:GitHub  q:Quit'
+  legends = 'j/k:Nav  f/F:Page  g/G:Top/End  J/K:Scroll  d:Diff  l:Log  b:Branches  TAB:GitHub  q:Quit'
   @p_bottom.say(legends)
 end
 
@@ -1707,7 +1707,7 @@ def handle_key(chr)
     
     # Use fast update for major jumps to avoid extended fetch delays
     update_right_pane(true)
-  when 'PgDOWN'
+  when 'PgDOWN', 'f'  # 'f' as alternative to PageDown for keyboards without PgDn key
     # Page down in left pane
     old_index = @index
     @index = [@index + @p_left.h - 3, @max_index].min
@@ -1743,7 +1743,7 @@ def handle_key(chr)
     
     # Show basic info immediately, schedule extended fetch for when user pauses  
     update_right_pane(true)
-  when 'PgUP'
+  when 'PgUP', 'F'  # 'F' as alternative to PageUp for keyboards without PgUp key
     # Page up in left pane
     old_index = @index
     @index = [@index - @p_left.h + 3, @min_index].max
@@ -2257,7 +2257,7 @@ def update_right_pane(fast_update = false)
       end
     end
   when :log
-    show_commit_details(@log_entries[@index]) if @index >= 0 && @index < @log_entries.length
+    show_commit_details(@log_entries[@index][:hash]) if @index >= 0 && @index < @log_entries.length
   when :branches
     # Handle branch details if needed
   when :github_repos
