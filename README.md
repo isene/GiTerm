@@ -1,6 +1,7 @@
 # GiTerm - Git &amp; GitHub Terminal User Interface
 
 <img src="img/giterm_logo.svg" align="left" width="150" height="150">
+<br clear="left"/>
 
 [![License](https://img.shields.io/badge/License-Public%20Domain-brightgreen.svg)](https://unlicense.org/)
 [![GitHub stars](https://img.shields.io/github/stars/isene/GiTerm.svg)](https://github.com/isene/GiTerm/stargazers)
