@@ -2,6 +2,15 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [2.0.3] - 2025-10-27
+
+### ✨ Improvements
+- Improved README display with markdown filtering to remove clutter
+- Removed badge markdown, HTML image tags, and HTML break tags from README preview
+- Replaced emoji with urxvt-compatible symbols for better terminal compatibility
+- Added distinct symbols for different file types (directories, Ruby, Python, JS, config files)
+- File display now uses: ▶ (directories), ★ (Ruby), ▪ (Python), ▷ (JS), ⚙ (config), • (markdown), ◦ (other)
+
 ## [2.0.2] - 2025-08-19
 
 ### 🐛 Bug Fixes

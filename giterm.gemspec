@@ -1,11 +1,11 @@
 Gem::Specification.new do |spec|
   spec.name          = "giterm"
-  spec.version       = "2.0.2"
+  spec.version       = "2.0.3"
   spec.authors       = ["Geir Isene"]
   spec.email         = ["g@isene.com"]
 
   spec.summary       = "A full-featured Git and GitHub Terminal User Interface (TUI)"
-  spec.description   = "GiTerm is a powerful terminal interface for Git and GitHub, providing an intuitive TUI for repository management, issue tracking, and pull request handling. Version 2.0.2: Fixed macOS branch selection and commit diff display issues."
+  spec.description   = "GiTerm is a powerful terminal interface for Git and GitHub, providing an intuitive TUI for repository management, issue tracking, and pull request handling. Version 2.0.3: Improved README display with markdown filtering and urxvt-compatible symbols."
   spec.homepage      = "https://github.com/isene/GiTerm"
   spec.license       = "Unlicense"
   spec.required_ruby_version = ">= 2.7.0"

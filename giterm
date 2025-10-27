@@ -7,7 +7,7 @@
 # Author:     Geir Isene <g@isene.com> (adapted from RTFM)
 # Github:     https://github.com/isene/GiTerm
 # License:    Public domain
-@version = '2.0.1'
+@version = '2.0.3'
 
 # SAVE & STORE TERMINAL {{{1
 ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
