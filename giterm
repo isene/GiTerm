@@ -1233,6 +1233,9 @@ def filter_markdown_clutter(text)
   # Remove HTML image tags
   text = text.gsub(/<img[^>]*>/, '')
 
+  # Remove HTML break tags
+  text = text.gsub(/<br[^>]*>/, '')
+
   # Remove lines that are only badges/links (leftover clutter)
   text = text.lines.reject { |line| line.strip.match?(/^[\[\]():\/.a-zA-Z0-9_-]+$/) && line.include?('](') }.join
 
