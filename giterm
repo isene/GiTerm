@@ -1306,8 +1306,12 @@ def fetch_repo_files(repo_full_name, path = '')
              when 'dir' then '▶'
              when 'file'
                case File.extname(item['name']).downcase
-               when '.json', '.yml', '.yaml' then '□'
-               else '•'
+               when '.md' then '•'
+               when '.rb' then '★'
+               when '.py' then '▪'
+               when '.js' then '▷'
+               when '.json', '.yml', '.yaml' then '⚙'
+               else '◦'
                end
              else '?'
              end
