@@ -1303,20 +1303,15 @@ def fetch_repo_files(repo_full_name, path = '')
     # Show directories first, then files
     (dirs + files).each do |item|
       icon = case item['type']
-             when 'dir' then '📁'
+             when 'dir' then '▶'
              when 'file'
                case File.extname(item['name']).downcase
-               when '.md' then '📄'
-               when '.rb' then '💎'
-               when '.py' then '🐍'
-               when '.js' then '📜'
-               when '.json' then '⚙️'
-               when '.yml', '.yaml' then '⚙️'
-               else '📄'
+               when '.json', '.yml', '.yaml' then '□'
+               else '•'
                end
-             else '❓'
+             else '?'
              end
-      
+
       size_info = item['size'] ? " (#{format_file_size(item['size'])})" : ""
       content += "#{icon} #{item['name']}#{size_info}\n"
     end
