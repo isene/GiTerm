@@ -1225,17 +1225,37 @@ rescue => e
   log_debug("Error in extended fetch: #{e.message}")
 end
 
+def filter_markdown_clutter(text)
+  # Remove badge markdown (both simple and nested)
+  # Matches: ![text](url) and [![text](url)](link)
+  text = text.gsub(/!\[(?:[^\]]*\[[^\]]*\][^\]]*|[^\]]*)\]\([^\)]+\)/, '')
+
+  # Remove HTML image tags
+  text = text.gsub(/<img[^>]*>/, '')
+
+  # Remove lines that are only badges/links (leftover clutter)
+  text = text.lines.reject { |line| line.strip.match?(/^[\[\]():\/.a-zA-Z0-9_-]+$/) && line.include?('](') }.join
+
+  # Remove excessive blank lines (more than 2 consecutive)
+  text = text.gsub(/\n{3,}/, "\n\n")
+
+  # Remove lines that are only whitespace
+  text = text.lines.reject { |line| line.strip.empty? && line != "\n" }.join
+
+  text.strip
+end
+
 def fetch_readme(repo_full_name)
   return nil unless repo_full_name
-  
+
   # Try different README variations
   readme_files = ['README.md', 'readme.md', 'README.txt', 'README', 'readme.txt']
-  
+
   readme_files.each do |filename|
     begin
       result = github_request("/repos/#{repo_full_name}/contents/#{filename}")
       next if result.is_a?(Hash) && result[:error]
-      
+
       # Decode base64 content
       if result.is_a?(Hash) && result['content'] && result['encoding'] == 'base64'
         decoded = Base64.decode64(result['content'].gsub(/\s/, ''))
@@ -1244,15 +1264,16 @@ def fetch_readme(repo_full_name)
         unless decoded.valid_encoding?
           decoded = decoded.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '?')
         end
-        # Limit README display to avoid overwhelming the pane
-        return decoded.lines.first(20).join.strip
+        # Filter markdown clutter and limit README display
+        filtered = filter_markdown_clutter(decoded)
+        return filtered.lines.first(20).join.strip
       end
     rescue => e
       log_debug("Error fetching README #{filename}: #{e.message}")
       next
     end
   end
-  
+
   nil
 end
 
