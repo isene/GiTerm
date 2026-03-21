@@ -7,7 +7,7 @@
 # Author:     Geir Isene <g@isene.com> (adapted from RTFM)
 # Github:     https://github.com/isene/GiTerm
 # License:    Public domain
-@version = '2.0.3'
+@version = '2.0.4'
 
 # SAVE & STORE TERMINAL {{{1
 ORIG_STTY = `stty -g 2>/dev/null`.chomp rescue ''
@@ -911,7 +911,26 @@ def github_request_http(endpoint)
 
         JSON.parse(body)
       else
-        { error: "GitHub API error: #{response.code} - #{response.message}" }
+        error_msg = case response.code
+                    when '401'
+                      'Authentication failed (token expired or invalid). Press T to update token.'
+                    when '403'
+                      remaining = response['X-RateLimit-Remaining']
+                      if remaining == '0'
+                        reset_time = response['X-RateLimit-Reset']
+                        reset_in = reset_time ? ((reset_time.to_i - Time.now.to_i) / 60.0).ceil : '?'
+                        "GitHub API rate limit exceeded. Resets in ~#{reset_in} minutes."
+                      else
+                        "Access forbidden (403). Check token permissions."
+                      end
+                    when '404'
+                      'Resource not found (404). Repository may be private or deleted.'
+                    when '429'
+                      'Too many requests (429). Please wait a moment and retry.'
+                    else
+                      "GitHub API error: #{response.code} - #{response.message}"
+                    end
+        { error: error_msg }
       end
     end
   rescue JSON::ParserError => e
@@ -931,33 +950,62 @@ end
 
 def github_request_curl(endpoint)
   begin
-    # Build curl command as a string to ensure proper formatting
+    # Build curl command with separate connect and total timeouts
     url = "https://api.github.com#{endpoint}"
-    curl_cmd = "curl -s -f --max-time 10 " \
+    curl_cmd = "curl -s --connect-timeout 10 --max-time 20 " \
+               "-w '\\n%{http_code}' " \
                "-H 'Authorization: token #{@github_token}' " \
                "-H 'Accept: application/vnd.github.v3+json' " \
                "-H 'User-Agent: GiTerm/1.0' " \
                "'#{url}'"
-    
+
     # Debug: log the curl command (without showing full token)
     debug_cmd = curl_cmd.sub(@github_token, "#{@github_token[0..10]}...")
     log_debug("Executing curl: #{debug_cmd}")
-    
+
     # Capture both stdout and stderr for better debugging
-    result = `#{curl_cmd} 2>&1`
+    raw_result = `#{curl_cmd} 2>&1`
     exit_code = $?.exitstatus
-    
-    if exit_code == 0 && !result.empty?
-      JSON.parse(result)
+
+    if exit_code == 0
+      # Extract HTTP status code from the last line (-w appends it)
+      lines = raw_result.rstrip.split("\n")
+      http_code = lines.last.strip
+      body = lines[0...-1].join("\n")
+
+      if http_code == '200' && !body.empty?
+        JSON.parse(body)
+      elsif body.empty?
+        { error: 'Empty response body from GitHub API.' }
+      else
+        error_msg = case http_code
+                    when '401'
+                      'Authentication failed (token expired or invalid). Press T to update token.'
+                    when '403'
+                      parsed = JSON.parse(body) rescue {}
+                      if parsed['message']&.include?('rate limit')
+                        'GitHub API rate limit exceeded. Wait a few minutes and retry.'
+                      else
+                        "Access forbidden (403). Check token permissions."
+                      end
+                    when '404'
+                      'Resource not found (404). Repository may be private or deleted.'
+                    when '429'
+                      'Too many requests (429). Please wait a moment and retry.'
+                    else
+                      "GitHub API error (HTTP #{http_code})."
+                    end
+        { error: error_msg }
+      end
     else
       error_msg = case exit_code
-                  when 22 then 'HTTP error (likely 401/403 - check token)'
-                  when 6 then 'Could not resolve host (network issue)'
-                  when 7 then 'Failed to connect (network issue)'
-                  when 28 then 'Operation timeout'
-                  else "curl failed (exit code: #{exit_code})"
+                  when 6 then 'Could not resolve host. Check network connection.'
+                  when 7 then 'Failed to connect to GitHub. Check network connection.'
+                  when 28 then 'Request timed out. GitHub may be slow or unreachable.'
+                  when 35 then 'SSL/TLS connection error.'
+                  else "Network error (curl exit code: #{exit_code})."
                   end
-      { error: "#{error_msg}. Response: #{result[0..100]}" }
+      { error: error_msg }
     end
   rescue JSON::ParserError => e
     { error: "Invalid JSON from curl: #{e.message}" }
@@ -1348,15 +1396,21 @@ def github_issues
   return if @selected_repo.empty?
   
   result = github_request("/repos/#{@selected_repo}/issues?state=open&per_page=50")
-  
-  if result[:error]
+
+  if result.is_a?(Hash) && result[:error]
     @p_left.say(result[:error].fg(196))
+    @p_bottom.say('Failed to load issues.')
     return
   end
-  
+
+  unless result.is_a?(Array)
+    @p_left.say('Unexpected response format from GitHub API.'.fg(196))
+    return
+  end
+
   result.each do |issue|
     next if issue['pull_request']  # Skip PRs
-    
+
     @github_issues << {
       number: issue['number'],
       title: issue['title'],
@@ -1435,12 +1489,18 @@ def github_pull_requests
   return if @selected_repo.empty?
   
   result = github_request("/repos/#{@selected_repo}/pulls?state=open&per_page=50")
-  
-  if result[:error]
+
+  if result.is_a?(Hash) && result[:error]
     @p_left.say(result[:error].fg(196))
+    @p_bottom.say('Failed to load pull requests.')
     return
   end
-  
+
+  unless result.is_a?(Array)
+    @p_left.say('Unexpected response format from GitHub API.'.fg(196))
+    return
+  end
+
   result.each do |pr|
     @github_prs << {
       number: pr['number'],
@@ -1557,14 +1617,14 @@ def github_search_repositories
   # Perform the search
   result = github_request("/search/repositories?q=#{CGI.escape(query)}&sort=stars&order=desc&per_page=50")
   
-  if result[:error]
+  if result.is_a?(Hash) && result[:error]
     @p_left.clear
     @p_left.say("Search Error: #{result[:error]}".fg(196))
     return
   end
-  
+
   # Process search results
-  if result['items'] && result['items'].any?
+  if result.is_a?(Hash) && result['items'] && result['items'].any?
     result['items'].each do |repo|
       @github_search_results << {
         id: repo['id'],

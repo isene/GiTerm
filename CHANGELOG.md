@@ -2,6 +2,20 @@
 
 All notable changes to GiTerm will be documented in this file.
 
+## [2.0.4] - 2026-03-21
+
+### Bug Fixes
+- Fixed crash in issues, pull requests, and search views when GitHub API returns an error (TypeError from calling `[:error]` on an Array)
+- Added `is_a?(Array)` guard in issues and pull requests before iterating results
+- Added `is_a?(Hash)` guard in search before accessing `result['items']`
+
+### Improvements
+- Specific error messages for HTTP 401 (token expired), 403 (rate limit or forbidden), 404, and 429 (too many requests)
+- Rate-limit errors now show approximate reset time in minutes
+- Curl requests now use separate `--connect-timeout 10` and `--max-time 20` for better timeout granularity
+- Curl requests now capture HTTP status code via `-w` flag instead of relying on `-f` exit codes
+- Curl exit code 35 (SSL error) now gets a clear error message
+
 ## [2.0.3] - 2025-10-27
 
 ### ✨ Improvements
