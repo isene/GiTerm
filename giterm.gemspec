@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "giterm"
-  spec.version       = "2.0.4"
+  spec.version       = "2.0.5"
   spec.authors       = ["Geir Isene"]
   spec.email         = ["g@isene.com"]
 
@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["."]
 
   # Runtime dependencies
-  spec.add_runtime_dependency "rcurses", "~> 6.0"
+  spec.add_runtime_dependency "rcurses", "~> 7.0"
 
   # Development dependencies
   spec.add_development_dependency "rubocop", "~> 1.50"

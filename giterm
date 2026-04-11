@@ -555,7 +555,7 @@ def show_repo_overview
     return
   end
   
-  content = "Repository Overview\n".b.fg(156)
+  content = "Repository Overview\n".bd.fg(156)
   content += ('=' * 30) + "\n\n"
   
   # Get repository information
@@ -1018,7 +1018,7 @@ def show_github_setup_in_nongit
   @mode = :status  # Use status mode but show special message
   @status_items = []  # Empty items list
   
-  content = "GiTerm - GitHub Terminal UI\n".b.fg(156)
+  content = "GiTerm - GitHub Terminal UI\n".bd.fg(156)
   content += ('=' * 35) + "\n\n"
   
   content += "Not in a Git repository\n".fg(196)
@@ -1045,7 +1045,7 @@ def show_github_setup_in_nongit
   
   @p_right.clear
   if @github_token.empty?
-    help_text = "GitHub Setup Guide\n".b.fg(156)
+    help_text = "GitHub Setup Guide\n".bd.fg(156)
     help_text += ('=' * 25) + "\n\n"
     help_text += "1. Press 'T' to start token setup\n".fg(249)
     help_text += "2. Follow the instructions\n".fg(249)
@@ -1085,7 +1085,7 @@ def github_repos
   @p_bottom.say('Loading GitHub repositories...')
   
   if @github_token.empty?
-    content = "GitHub Integration Setup\n".b.fg(156)
+    content = "GitHub Integration Setup\n".bd.fg(156)
     content += ('=' * 35) + "\n\n"
     content += "[!] No GitHub token found\n\n".fg(196)
     
@@ -1208,9 +1208,9 @@ def show_repo_details(repo, immediate_extended_fetch = false)
 end
 
 def display_basic_repo_info(repo)
-  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content = (repo[:full_name] || 'Unknown repository').bd.fg(156) + "\n"
   content += ('=' * 60) + "\n\n"
-  
+
   # Basic repo info with nil protection (always shown immediately)
   content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
   content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
@@ -1238,9 +1238,9 @@ def fetch_and_display_extended_content(repo)
   log_debug("EXECUTING fetch_and_display_extended_content for: #{repo[:full_name]}")
   
   # Build the basic content again
-  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content = (repo[:full_name] || 'Unknown repository').bd.fg(156) + "\n"
   content += ('=' * 60) + "\n\n"
-  
+
   content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
   content += 'Private: '.fg(249) + (repo[:private] ? 'Yes' : 'No') + "\n"
   content += 'Language: '.fg(249) + (repo[:language] || 'Not specified') + "\n"
@@ -1253,7 +1253,7 @@ def fetch_and_display_extended_content(repo)
   # Fetch README
   readme_content = fetch_readme(repo[:full_name])
   if readme_content
-    content += "README.md".b.fg(154) + "\n"
+    content += "README.md".bd.fg(154) + "\n"
     content += ('-' * 20) + "\n"
     content += readme_content + "\n\n"
   end
@@ -1261,7 +1261,7 @@ def fetch_and_display_extended_content(repo)
   # Fetch directory structure
   files_content = fetch_repo_files(repo[:full_name])
   if files_content
-    content += "Repository Files".b.fg(154) + "\n" 
+    content += "Repository Files".bd.fg(154) + "\n" 
     content += ('-' * 20) + "\n"
     content += files_content
   end
@@ -1459,7 +1459,7 @@ def display_github_issues
 end
 
 def show_issue_details(issue)
-  content = "##{issue[:number]} #{issue[:title]}".b.fg(156) + "\n"
+  content = "##{issue[:number]} #{issue[:title]}".bd.fg(156) + "\n"
   content += ('=' * 60) + "\n\n"
   content += 'Author: '.fg(249) + issue[:user] + "\n"
   content += 'Created: '.fg(249) + issue[:created_at] + "\n"
@@ -1551,7 +1551,7 @@ def display_github_prs
 end
 
 def show_pr_details(pull_request)
-  content = "##{pull_request[:number]} #{pull_request[:title]}".b.fg(156) + "\n"
+  content = "##{pull_request[:number]} #{pull_request[:title]}".bd.fg(156) + "\n"
   content += ('=' * 60) + "\n\n"
   content += 'Author: '.fg(249) + pull_request[:user] + "\n"
   content += 'Created: '.fg(249) + pull_request[:created_at] + "\n"
@@ -1693,9 +1693,9 @@ def show_search_repo_details(repo, immediate_extended_fetch = false)
 end
 
 def display_basic_search_repo_info(repo)
-  content = (repo[:full_name] || 'Unknown repository').b.fg(156) + "\n"
+  content = (repo[:full_name] || 'Unknown repository').bd.fg(156) + "\n"
   content += ('=' * 60) + "\n\n"
-  
+
   # Basic repo info with more details for search results (always shown immediately)
   content += 'Owner: '.fg(249) + (repo[:owner] || 'Unknown') + "\n"
   content += 'Description: '.fg(249) + (repo[:description] || 'No description') + "\n"
